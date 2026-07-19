@@ -1,0 +1,298 @@
+<script setup lang="ts">
+import ActionBar from '@src/components/ActionBar.vue';
+import PrunButton from '@src/components/PrunButton.vue';
+import Header from '@src/components/Header.vue';
+import { ActionRunner } from '@src/features/XIT/ACT/runner/action-runner';
+import { useTile } from '@src/hooks/use-tile';
+import { Logger, LogTag } from '@src/features/XIT/ACT/runner/logger';
+import LogWindow from '@src/features/XIT/ACT/LogWindow.vue';
+import ConfigWindow from '@src/features/XIT/ACT/ConfigureWindow.vue';
+import { ActionPackageConfig } from '@src/features/XIT/ACT/shared-types';
+import { act } from '@src/features/XIT/ACT/act-registry';
+
+const { pkg } = defineProps<{ pkg: UserData.ActionPackageData }>();
+
+const tile = useTile();
+let goingToSplit = ref(false);
+
+const config = ref({
+  globalOptions: { skipMissingMaterials: false },
+  materialGroups: {},
+  actions: {},
+} as ActionPackageConfig);
+
+const log = ref([] as { tag: LogTag; message: string }[]);
+const logScrolling = ref(true);
+const isPreviewing = ref(false);
+const isRunning = ref(false);
+const status = ref(undefined as string | undefined);
+const actReady = ref(false);
+const autoAct = ref(false);
+let autoActTimer: ReturnType<typeof setTimeout> | undefined;
+
+watch(config, clearLog, { deep: true });
+
+watch([actReady, autoAct], ([ready, auto]) => {
+  clearTimeout(autoActTimer);
+  if (ready && auto) {
+    autoActTimer = setTimeout(() => {
+      if (actReady.value && autoAct.value) {
+        onActClick();
+      }
+    }, 100);
+  }
+});
+
+watchEffect(() => {
+  for (const name of pkg.groups.map(x => x.name!)) {
+    if (config.value.materialGroups[name] === undefined) {
+      config.value.materialGroups[name] = {};
+    }
+  }
+  for (const name of pkg.actions.map(x => x.name!)) {
+    if (config.value.actions[name] === undefined) {
+      config.value.actions[name] = {};
+    }
+  }
+});
+
+const needsConfigure = computed(() => {
+  for (const action of pkg.actions) {
+    const info = act.getActionInfo(action.type);
+    if (info && info.needsConfigure?.(action)) {
+      return true;
+    }
+  }
+  for (const group of pkg.groups) {
+    const info = act.getMaterialGroupInfo(group.type);
+    if (info && info.needsConfigure?.(group)) {
+      return true;
+    }
+  }
+  return false;
+});
+
+const isValidConfig = computed(() => {
+  for (const action of pkg.actions) {
+    const info = act.getActionInfo(action.type);
+    let actionConfig = config.value.actions[action.name!] ?? {};
+    const isValid = info?.isValidConfig?.(action, actionConfig) ?? true;
+    if (!isValid) {
+      return false;
+    }
+  }
+  for (const group of pkg.groups) {
+    const info = act.getMaterialGroupInfo(group.type);
+    let groupConfig = config.value.materialGroups[group.name!] ?? {};
+    const isValid = info?.isValidConfig?.(group, groupConfig) ?? true;
+    if (!isValid) {
+      return false;
+    }
+  }
+  return true;
+});
+
+const showConfigure = ref(true);
+
+const shouldShowConfigure = computed(() => {
+  return needsConfigure.value && (!isValidConfig.value || showConfigure.value);
+});
+
+const runner = new ActionRunner({
+  tile,
+  log: new Logger(logMessage),
+  onBufferSplit: () => (goingToSplit.value = true),
+  onStart: () => (isRunning.value = true),
+  onEnd: () => {
+    isRunning.value = false;
+    status.value = undefined;
+    clearTimeout(autoActTimer);
+  },
+  onStatusChanged: (title, keepReady) => {
+    status.value = title;
+    if (!keepReady) {
+      actReady.value = false;
+    }
+  },
+  onActReady: () => {
+    actReady.value = true;
+  },
+  isAutoAct: () => autoAct.value,
+});
+
+function onConfigureApplyClick() {
+  showConfigure.value = false;
+}
+
+function onConfigureClick() {
+  showConfigure.value = true;
+}
+
+async function onPreviewClick() {
+  logScrolling.value = false;
+  clearLog();
+  isPreviewing.value = true;
+  await runner.preview(pkg, config.value);
+  isPreviewing.value = false;
+  status.value = undefined;
+}
+
+function onExecuteClick() {
+  logScrolling.value = true;
+  clearLog();
+  actReady.value = false;
+  runner.execute(pkg, config.value);
+}
+
+function onCancelClick() {
+  actReady.value = false;
+  autoAct.value = false;
+  clearTimeout(autoActTimer);
+  runner.cancel();
+}
+
+function onActClick() {
+  actReady.value = false;
+  runner.act();
+}
+
+function onSkipClick() {
+  actReady.value = false;
+  runner.skip();
+}
+
+function logMessage(tag: LogTag, message: string) {
+  return log.value.push({ tag, message });
+}
+
+function clearLog() {
+  log.value.length = 0;
+}
+</script>
+
+<template>
+  <div v-if="goingToSplit" />
+  <div v-else :class="$style.root">
+    <Header :class="$style.header">{{ pkg.global.name }}</Header>
+    <ConfigWindow
+      v-if="shouldShowConfigure"
+      :pkg="pkg"
+      :config="config"
+      :class="$style.mainWindow" />
+    <LogWindow v-else :messages="log" :scrolling="logScrolling" :class="$style.mainWindow" />
+    <div :class="$style.status">
+      <span>状态：</span>
+      <span v-if="status">{{ status }}</span>
+      <span v-else-if="shouldShowConfigure">请配置材料组参数 ↑</span>
+      <span v-else>按执行开始</span>
+    </div>
+    <ActionBar :class="$style.actionBar">
+      <template v-if="shouldShowConfigure">
+        <PrunButton primary :disabled="!isValidConfig" @click="onConfigureApplyClick">
+          应用
+        </PrunButton>
+      </template>
+      <template v-else-if="isPreviewing">
+        <div :class="$style.actionGroup">
+          <PrunButton v-if="needsConfigure" primary @click="onConfigureClick">配置</PrunButton>
+          <PrunButton disabled>预览</PrunButton>
+          <PrunButton disabled>执行</PrunButton>
+        </div>
+      </template>
+      <template v-else-if="!isRunning">
+        <div :class="$style.actionGroup">
+          <PrunButton v-if="needsConfigure" primary @click="onConfigureClick">配置</PrunButton>
+          <PrunButton primary @click="onPreviewClick">预览</PrunButton>
+          <PrunButton primary :class="$style.executeButton" @click="onExecuteClick">
+            执行
+          </PrunButton>
+          <PrunButton :primary="autoAct" :neutral="!autoAct" @click="autoAct = !autoAct">
+            {{ autoAct ? '🟢 自动' : '自动' }}
+          </PrunButton>
+          <label :class="$style.skipCheckbox">
+            <input
+              v-model="config.globalOptions!.skipMissingMaterials"
+              type="checkbox" />跳过不足材料
+          </label>
+        </div>
+      </template>
+      <template v-else>
+        <div :class="$style.actionGroup">
+          <PrunButton v-if="needsConfigure" primary disabled>配置</PrunButton>
+          <PrunButton primary disabled>预览</PrunButton>
+          <PrunButton
+            danger
+            :disabled="!actReady"
+            :class="$style.executeButton"
+            @click="onCancelClick">
+            取消
+          </PrunButton>
+          <PrunButton primary :disabled="!actReady" @click="onActClick">执行步骤</PrunButton>
+          <PrunButton neutral :disabled="!actReady" @click="onSkipClick">跳过</PrunButton>
+          <PrunButton :primary="autoAct" :neutral="!autoAct" @click="autoAct = !autoAct">
+            {{ autoAct ? '🟢 自动' : '自动' }}
+          </PrunButton>
+          <label :class="$style.skipCheckbox">
+            <input
+              v-model="config.globalOptions!.skipMissingMaterials"
+              type="checkbox" />跳过不足材料
+          </label>
+        </div>
+      </template>
+    </ActionBar>
+  </div>
+</template>
+
+<style module>
+.root {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  user-select: none;
+}
+
+.mainWindow {
+  flex-grow: 1;
+}
+
+.header {
+  margin-left: 4px;
+}
+
+.status {
+  margin-left: 5px;
+  margin-top: 5px;
+}
+
+.actionBar {
+  margin-left: 2px;
+  justify-content: flex-start;
+  user-select: none;
+}
+
+.actionGroup {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.skipCheckbox {
+  display: flex;
+  align-items: center;
+  margin-right: 5px;
+  margin-left: 5px;
+  font-size: 11px;
+  cursor: pointer;
+  color: #ccc;
+}
+
+.skipCheckbox input {
+  margin-right: 4px;
+}
+
+/* 使取消和执行按钮宽度相同，保持布局稳定。 */
+.executeButton {
+  width: 68px;
+}
+</style>

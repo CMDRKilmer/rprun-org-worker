@@ -1,0 +1,79 @@
+{
+  "name": "refined-prun",
+  "version": "26.6.18",
+  "private": true,
+  "description": "Browser extension that simplifies the Prosperous Universe interface and adds useful features",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/refined-prun/refined-prun.git"
+  },
+  "scripts": {
+    "compile": "tsc --noEmit",
+    "build": "pnpm run clean && pnpm run compile && vite build && vite build --config vite.content.config.mts && node scripts/fix-innerHTML.mjs",
+    "clean": "rimraf dist",
+    "dev": "cross-env NODE_ENV=development vite build --config vite.content.config.mts --mode development && vite build -w --mode development",
+    "fix": "pnpm exec eslint ./ --fix --concurrency auto",
+    "lint": "pnpm exec eslint --concurrency auto",
+    "prepare": "husky",
+    "prettier": "prettier . --write --ignore-path .prettierignore",
+    "test": "vitest run"
+  },
+  "type": "module",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.99.2",
+    "@types/js-cookie": "^3.0.6",
+    "chart.js": "^4.5.0",
+    "chartjs-plugin-datalabels": "^2.2.0",
+    "chartjs-plugin-zoom": "^2.2.0",
+    "dayjs": "^1.11.18",
+    "engine.io-parser": "^5.2.3",
+    "js-cookie": "^3.0.8",
+    "math-expression-evaluator": "^2.0.7",
+    "one-mutation": "^3.0.1",
+    "onetime": "^8.0.0",
+    "socket.io-parser": "^4.2.6",
+    "tinycolor2": "^1.6.0",
+    "ts-extras": "^1.2.0",
+    "type-fest": "^5.8.0",
+    "typed-query-selector": "^2.12.0",
+    "uuid": "^14.0.1",
+    "vue": "^3.5.20",
+    "vue-chartjs": "^5.3.2",
+    "vue-draggable-plus": "^0.6.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.15.0",
+    "@laynezh/vite-plugin-lib-assets": "^2.1.0",
+    "@types/chrome": "^0.2.2",
+    "@types/node": "^26.1.0",
+    "@types/tinycolor2": "^1.4.6",
+    "@types/uuid": "^10.0.0",
+    "@vitejs/plugin-vue": "^6.0.1",
+    "@vitejs/plugin-vue-jsx": "^5.1.1",
+    "@vue/tsconfig": "^0.9.1",
+    "cross-env": "^10.0.0",
+    "eslint": "^9.15.0",
+    "eslint-config-prettier": "10.1.8",
+    "eslint-plugin-prettier": "5.5.4",
+    "eslint-plugin-vue": "^10.4.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.0.8",
+    "prettier": "^3.6.2",
+    "rimraf": "^6.0.1",
+    "tslib": "^2.8.1",
+    "typescript": "6.0.3",
+    "typescript-eslint": "^7.18.0",
+    "unimport": "^6.3.0",
+    "vite": "^7.3.6"
+  },
+  "lint-staged": {
+    "*.{js,jsx,ts,tsx,vue}": [
+      "prettier --write"
+    ]
+  },
+  "packageManager": "pnpm@9.4.0",
+  "engines": {
+    "node": ">=22.16.0"
+  }
+}

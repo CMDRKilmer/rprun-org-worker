@@ -1,0 +1,18 @@
+.foot {
+  > span {
+    flex-grow: 1;
+  }
+}
+
+.container {
+  display: inline-block;
+  margin-right: 10px;
+}
+
+.label {
+  padding: 2px 6px 3px;
+  background: linear-gradient(90deg, #ff6b6b, #feca57, #48dbfb, #ff9ff3, #54a0ff);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}

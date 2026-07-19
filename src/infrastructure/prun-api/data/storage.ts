@@ -1,0 +1,59 @@
+import { createEntityStore } from '@src/infrastructure/prun-api/data/create-entity-store';
+import { onApiMessage } from '@src/infrastructure/prun-api/data/api-messages';
+import { createGroupMapGetter } from '@src/infrastructure/prun-api/data/create-map-getter';
+
+const store = createEntityStore<PrunApi.Store>();
+const state = store.state;
+
+onApiMessage({
+  STORAGE_STORAGES(data: { stores: PrunApi.Store[] }) {
+    store.setMany(data.stores);
+    store.setFetched();
+  },
+  STORAGE_CHANGE(data: { stores: PrunApi.Store[] }) {
+    store.setMany(data.stores);
+  },
+  STORAGE_REMOVED(data: { storeIds: string[] }) {
+    for (const id of data.storeIds) {
+      store.removeOne(id);
+    }
+  },
+});
+
+const getByAddressableId = createGroupMapGetter(state.all, x => x.addressableId);
+
+const getByName = createGroupMapGetter(state.all, x => x.name ?? '');
+
+const getByTypeRaw = createGroupMapGetter(state.all, x => x.type);
+const getByType = (value?: string | null) =>
+  state.fetched.value ? (getByTypeRaw(value) ?? []) : getByTypeRaw(value);
+
+// 功能仅适用于个人存储，因此
+// 过滤掉基础设施建设存储。
+const personal = computed(() => state.all.value?.filter(isPersonalStorage));
+
+const nonPersonalTypes = new Set(['CONSTRUCTION_STORE', 'UPKEEP_STORE']);
+
+function isPersonalStorage(storage: PrunApi.Store) {
+  return !nonPersonalTypes.has(storage.type);
+}
+
+const fuelStores = computed(() => personal.value?.filter(isFuelStore));
+
+const nonFuelStores = computed(() => personal.value?.filter(x => !isFuelStore(x)));
+
+const fuelTypes = new Set(['STL_FUEL_STORE', 'FTL_FUEL_STORE', 'VORTEX_FUEL_STORE']);
+
+function isFuelStore(storage: PrunApi.Store) {
+  return fuelTypes.has(storage.type);
+}
+
+export const storagesStore = {
+  ...state,
+  all: personal,
+  fuelStores,
+  nonFuelStores,
+  getByAddressableId,
+  getByName,
+  getByType,
+};

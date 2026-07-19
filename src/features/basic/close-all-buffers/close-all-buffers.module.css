@@ -1,0 +1,18 @@
+.closeAllBtn {
+  margin-right: 6px;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 1px 4px;
+  color: var(--rp-color-text);
+  border: 1px solid #444;
+  border-radius: 2px;
+  white-space: nowrap;
+  user-select: none;
+  display: flex;
+  align-items: center;
+}
+
+.closeAllBtn:hover {
+  color: var(--rp-color-text-component);
+  border-color: #777;
+}

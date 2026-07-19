@@ -1,0 +1,98 @@
+import { createEntityStore } from '@src/infrastructure/prun-api/data/create-entity-store';
+import { onApiMessage } from '@src/infrastructure/prun-api/data/api-messages';
+import { createGroupMapGetter } from '@src/infrastructure/prun-api/data/create-map-getter';
+import { request } from '@src/infrastructure/prun-api/data/request-hooks';
+
+const store = createEntityStore<PrunApi.ProductionLine>();
+const state = store.state;
+const fetchedSites = reactive(new Set<string>());
+const fetchedAll = ref(false);
+
+onApiMessage({
+  CLIENT_CONNECTION_OPENED() {
+    fetchedSites.clear();
+    fetchedAll.value = false;
+  },
+  PRODUCTION_PRODUCTION_LINES(data: { productionLines: PrunApi.ProductionLine[] }) {
+    store.setAll(data.productionLines);
+    fetchedAll.value = true;
+    store.setFetched();
+  },
+  PRODUCTION_SITE_PRODUCTION_LINES(data: {
+    siteId: string;
+    productionLines: PrunApi.ProductionLine[];
+  }) {
+    store.setMany(data.productionLines);
+    fetchedSites.add(data.siteId);
+    store.setFetched();
+  },
+  PRODUCTION_PRODUCTION_LINE(data: PrunApi.ProductionLine) {
+    store.setOne(data);
+    store.setFetched();
+  },
+  PRODUCTION_PRODUCTION_LINE_ADDED(data: PrunApi.ProductionLine) {
+    store.addOne(data);
+    store.setFetched();
+  },
+  PRODUCTION_PRODUCTION_LINE_UPDATED(data: PrunApi.ProductionLine) {
+    store.updateOne(data);
+  },
+  PRODUCTION_PRODUCTION_LINE_REMOVED(data: { productionLineId: string }) {
+    store.removeOne(data.productionLineId);
+  },
+  PRODUCTION_ORDER_ADDED(data: PrunApi.ProductionOrder) {
+    const line = state.getById(data.productionLineId);
+    if (line !== undefined && !line.orders.some(x => x.id === data.id)) {
+      store.setOne({
+        ...line,
+        orders: [...line.orders, data],
+      });
+    }
+  },
+  PRODUCTION_ORDER_UPDATED(data: PrunApi.ProductionOrder) {
+    const line = state.getById(data.productionLineId);
+    if (line !== undefined) {
+      store.setOne({
+        ...line,
+        orders: line.orders.map(x => (x.id === data.id ? { ...x, ...data } : x)),
+      });
+    }
+  },
+  PRODUCTION_ORDER_REMOVED(data: { orderId: string; productionLineId: string }) {
+    const line = state.getById(data.productionLineId);
+    if (line !== undefined) {
+      store.setOne({
+        ...line,
+        orders: line.orders.filter(x => x.id !== data.orderId),
+      });
+    }
+  },
+});
+
+const getByShortSiteId = createGroupMapGetter(state.all, x => x.siteId.substring(0, 8));
+
+const getByFullSiteId = createGroupMapGetter(state.all, x => x.siteId);
+
+const getBySiteId = (value?: string | null) => {
+  const result = getByFullSiteId(value) ?? getByShortSiteId(value);
+  if (result) {
+    return result;
+  }
+
+  if (!value) {
+    return undefined;
+  }
+
+  if (fetchedAll.value || fetchedSites.has(value)) {
+    return [];
+  } else {
+    request.production(value);
+  }
+
+  return undefined;
+};
+
+export const productionStore = {
+  ...state,
+  getBySiteId,
+};

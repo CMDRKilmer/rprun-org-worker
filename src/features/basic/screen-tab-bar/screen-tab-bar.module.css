@@ -1,0 +1,21 @@
+.contextAndScreens {
+  flex: 1 1 auto;
+}
+
+.screenControls {
+  display: inline-flex;
+  flex: 1 1 auto;
+
+  > :not(:last-child) {
+    flex-shrink: 0;
+  }
+}
+
+.hideButton {
+  width: 26px;
+  text-align: center;
+}
+
+.hiddenName {
+  color: #666;
+}

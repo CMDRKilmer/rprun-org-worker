@@ -1,0 +1,69 @@
+import { refPrunId } from '@src/infrastructure/prun-ui/attributes';
+import { storagesStore } from '@src/infrastructure/prun-api/data/storage';
+import { watchEffectWhileNodeAlive } from '@src/utils/watch';
+import { getI18nValue } from '@src/infrastructure/prun-ui/i18n';
+
+const storeTypes = [
+  'STORE',
+  'SHIP_STORE',
+  'STL_FUEL_STORE',
+  'FTL_FUEL_STORE',
+  'WAREHOUSE_STORE',
+  'CONSTRUCTION_STORE',
+  'UPKEEP_STORE',
+  'VORTEX_FUEL_STORE',
+];
+
+function onTileReady(tile: PrunTile) {
+  shortenFilterLabels(tile);
+  shortenTableLabels(tile);
+}
+
+function shortenFilterLabels(tile: PrunTile) {
+  const map = new Map<string, string>();
+  for (const type of storeTypes) {
+    map.set(getFullName(type), getShortName(type));
+  }
+  subscribe($$(tile.anchor, C.InventoriesListContainer.filter), async filter => {
+    for (const label of _$$(filter, C.RadioItem.value)) {
+      const type = label.textContent;
+      if (type) {
+        label.textContent = map.get(type) ?? type;
+      }
+    }
+  });
+}
+
+function shortenTableLabels(tile: PrunTile) {
+  const map = new Map<string, string>();
+  for (const type of storeTypes) {
+    map.set(type, getShortName(type));
+  }
+  subscribe($$(tile.anchor, 'tr'), row => {
+    const id = refPrunId(row);
+    const name = computed(() => {
+      const storage = storagesStore.getById(id.value);
+      return storage ? map.get(storage?.type) : undefined;
+    });
+    watchEffectWhileNodeAlive(row, () => {
+      const typeLabel = row.firstChild?.firstChild;
+      if (typeLabel && name.value !== undefined) {
+        typeLabel.textContent = name.value;
+      }
+    });
+  });
+}
+
+function getFullName(type: string) {
+  return getI18nValue(`StoreTypeLabel.${type}`, type);
+}
+
+function getShortName(type: string) {
+  return getI18nValue(`StoreTypeLabel.${type}_SHORT`, type);
+}
+
+function init() {
+  tiles.observe('INV', onTileReady);
+}
+
+features.add(import.meta.url, init, 'INV：缩短表格和过滤器中的存储类型名称。');

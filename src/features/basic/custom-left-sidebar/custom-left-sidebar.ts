@@ -1,0 +1,16 @@
+import css from '@src/utils/css-utils.module.css';
+import SidebarButtons from './SidebarButtons.vue';
+import { refAttributeValue } from '@src/utils/reactive-dom';
+
+function init() {
+  applyCssRule('#TOUR_TARGET_SIDEBAR_LEFT_02', css.hidden);
+  subscribe($$(document, C.Frame.sidebar), sidebar => {
+    const com = _$$(sidebar, C.Frame.toggle).find(x => x.textContent === 'COM');
+    const comIndicator = com ? _$(com, C.Frame.toggleIndicator) : undefined;
+    const comClass = comIndicator ? refAttributeValue(comIndicator, 'class') : ref(undefined);
+    const comPulse = computed(() => comClass.value?.includes(C.Frame.toggleIndicatorPulseActive));
+    createFragmentApp(SidebarButtons, reactive({ comPulse })).appendTo(sidebar);
+  });
+}
+
+features.add(import.meta.url, init, '使左侧边栏可通过设置自定义。');

@@ -1,0 +1,9 @@
+.row {
+  td:first-child {
+    width: 1%;
+  }
+
+  td:not(:first-child) {
+    width: unset;
+  }
+}
