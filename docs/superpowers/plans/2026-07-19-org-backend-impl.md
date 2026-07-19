@@ -606,6 +606,11 @@ export interface ContextVars {
     company_code: string;
     role: UserRole;
   };
+  // 便捷字段：等价于 user.sub，路由层直接 c.var.userId 取用
+  userId: string;
+  prunUsername: string;
+  companyCode: string;
+  role: UserRole;
 }
 ```
 
@@ -726,12 +731,17 @@ export class HttpError extends Error {
   }
 }
 
-// 常用错误快捷构造
+// 常用错误快捷构造（参数顺序统一为 code, message, status）
 export const badRequest = (code: string, message: string) => new HttpError(400, code, message);
 export const unauthorized = (message = 'Unauthorized') => new HttpError(401, 'UNAUTHORIZED', message);
 export const forbidden = (message = 'Forbidden') => new HttpError(403, 'FORBIDDEN', message);
 export const notFound = (message = 'Not Found') => new HttpError(404, 'NOT_FOUND', message);
 export const conflict = (code: string, message: string) => new HttpError(409, code, message);
+
+// 通用 API 错误构造（路由层用 throw apiError(...) 抛错；errorHandler 统一捕获）
+// 参数顺序：code, message, status（与 HttpError 构造器相反，便于路由层阅读）
+export const apiError = (code: string, message: string, status: number): HttpError =>
+  new HttpError(status, code, message);
 ```
 
 - [ ] **Step 4: 验证编译 + 提交**
@@ -862,6 +872,7 @@ describe('jwt', () => {
 
 ```ts
 // vitest.config.ts
+// 一次配置覆盖所有测试（jwt 单测 + 集成测试），Task 21 不再重复创建
 import { defineWorkersConfig } from '@cloudflare/vitest-pool-workers/config';
 
 export default defineWorkersConfig({
@@ -870,14 +881,19 @@ export default defineWorkersConfig({
       workers: {
         wrangler: { configPath: './wrangler.toml' },
         miniflare: {
-          modules: true,
-          script: 'export default { fetch() {} }',
+          // 提前声明 D1/KV 绑定，jwt 单测不用但配置兼容
+          d1Databases: ['DB'],
+          kvNamespaces: ['KV'],
         },
       },
     },
+    // 集成测试的 setup 文件由 Task 21 创建；Task 4 阶段如文件不存在 vitest 会忽略
+    setupFiles: ['./tests/setup.ts'],
   },
 });
 ```
+
+> ⚠️ **Task 4 阶段**：`./tests/setup.ts` 此时尚未创建。Vitest 在 `setupFiles` 找不到文件时会报错。如果先单独跑 Task 4 的 jwt 测试，可临时把 `setupFiles` 注释掉；Task 21 完成后该配置即生效。
 
 - [ ] **Step 4: 运行测试**
 
@@ -1579,10 +1595,34 @@ export interface ListTasksFilter {
   cursor?: string;
 }
 
+export interface ListTasksResult {
+  items: OrgTask[];
+  nextCursor: string | null;
+}
+
+// cursor = base64(JSON.stringify({ ts: ISO, id: taskId }))
+// 配合 ORDER BY updated_at DESC, id DESC 做 keyset 分页
+function decodeCursor(cursor: string): { ts: string; id: string } | null {
+  try {
+    const json = atob(cursor);
+    const parsed = JSON.parse(json);
+    if (typeof parsed.ts === 'string' && typeof parsed.id === 'string') {
+      return parsed;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function encodeCursor(ts: string, id: string): string {
+  return btoa(JSON.stringify({ ts, id }));
+}
+
 export async function listTasks(
   db: D1Database,
   filter: ListTasksFilter,
-): Promise<OrgTask[]> {
+): Promise<ListTasksResult> {
   const where: string[] = [];
   const binds: unknown[] = [];
 
@@ -1596,6 +1636,10 @@ export async function listTasks(
       where.push('publisher_username = ?');
       binds.push(filter.publisherUsername);
     }
+    if (filter.claimerUsername) {
+      where.push('claimer_username = ?');
+      binds.push(filter.claimerUsername);
+    }
     if (filter.location) {
       where.push('contract_json LIKE ?');
       binds.push(`%"location":"${filter.location}"%`);
@@ -1607,8 +1651,12 @@ export async function listTasks(
       where.push('type = ?');
       binds.push(filter.type);
     }
+    if (filter.claimerUsername) {
+      where.push('claimer_username = ?');
+      binds.push(filter.claimerUsername);
+    }
   } else {
-    // claimed
+    // claimed：按当前用户过滤
     where.push('claimer_id = ?');
     binds.push(filter.userId);
   }
@@ -1618,12 +1666,27 @@ export async function listTasks(
     binds.push(filter.since);
   }
 
-  const limit = filter.limit ?? 100;
-  binds.push(limit);
+  // cursor 分页：取 (updated_at, id) 在 cursor 之前的记录
+  if (filter.cursor) {
+    const c = decodeCursor(filter.cursor);
+    if (c) {
+      where.push('(updated_at < ? OR (updated_at = ? AND id < ?))');
+      binds.push(c.ts, c.ts, c.id);
+    }
+  }
 
-  const sql = `SELECT * FROM tasks WHERE ${where.join(' AND ')} ORDER BY updated_at DESC LIMIT ?`;
+  const limit = filter.limit ?? 100;
+  // 多取 1 条用于判断是否还有下一页
+  binds.push(limit + 1);
+
+  const sql = `SELECT * FROM tasks WHERE ${where.join(' AND ')} ORDER BY updated_at DESC, id DESC LIMIT ?`;
   const result = await db.prepare(sql).bind(...binds).all<TaskRow>();
-  return (result.results ?? []).map(mapTask);
+  const rows = result.results ?? [];
+  const hasMore = rows.length > limit;
+  const items = hasMore ? rows.slice(0, limit) : rows;
+  const last = items[items.length - 1];
+  const nextCursor = hasMore && last ? encodeCursor(last.updated_at, last.id) : null;
+  return { items: items.map(mapTask), nextCursor };
 }
 
 export async function findTaskById(db: D1Database, id: string): Promise<OrgTask | null> {
@@ -1714,15 +1777,19 @@ export async function claimTask(
 }
 
 export async function releaseTask(db: D1Database, taskId: string): Promise<void> {
+  // 释放后任务重新进入 PUBLISHED：重置 published_at 以便客户端"最新发布"排序
+  // （trigger trg_tasks_touch_updated_at 已自动更新 updated_at）
+  const now = new Date().toISOString();
   await db
     .prepare(
       `UPDATE tasks
        SET status = 'PUBLISHED',
            claimer_id = NULL, claimer_username = NULL, claimer_company_code = NULL,
-           contract_creator = NULL, claimed_at = NULL
+           contract_creator = NULL, claimed_at = NULL,
+           published_at = ?
        WHERE id = ?`,
     )
-    .bind(taskId)
+    .bind(now, taskId)
     .run();
 }
 
@@ -1872,10 +1939,34 @@ export interface ListAuditLogsFilter {
   actorId?: string;
 }
 
+export interface ListAuditLogsResult {
+  items: AuditLog[];
+  nextCursor: string | null;
+}
+
+// cursor = base64(JSON.stringify({ ts: ISO, id: logId }))
+// 配合 ORDER BY created_at DESC, id DESC 做 keyset 分页
+function decodeAuditCursor(cursor: string): { ts: string; id: string } | null {
+  try {
+    const json = atob(cursor);
+    const parsed = JSON.parse(json);
+    if (typeof parsed.ts === 'string' && typeof parsed.id === 'string') {
+      return parsed;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function encodeAuditCursor(ts: string, id: string): string {
+  return btoa(JSON.stringify({ ts, id }));
+}
+
 export async function listAuditLogs(
   db: D1Database,
   filter: ListAuditLogsFilter,
-): Promise<AuditLog[]> {
+): Promise<ListAuditLogsResult> {
   const where: string[] = [];
   const binds: unknown[] = [];
   if (filter.action) {
@@ -1887,16 +1978,24 @@ export async function listAuditLogs(
     binds.push(filter.actorId);
   }
   if (filter.cursor) {
-    where.push('created_at < ?');
-    binds.push(filter.cursor);
+    const c = decodeAuditCursor(filter.cursor);
+    if (c) {
+      where.push('(created_at < ? OR (created_at = ? AND id < ?))');
+      binds.push(c.ts, c.ts, c.id);
+    }
   }
   const limit = filter.limit ?? 100;
-  binds.push(limit);
+  binds.push(limit + 1);
   const sql = `SELECT * FROM audit_logs ${
     where.length ? `WHERE ${where.join(' AND ')}` : ''
-  } ORDER BY created_at DESC LIMIT ?`;
+  } ORDER BY created_at DESC, id DESC LIMIT ?`;
   const result = await db.prepare(sql).bind(...binds).all<AuditLogRow>();
-  return (result.results ?? []).map(mapAuditLog);
+  const rows = result.results ?? [];
+  const hasMore = rows.length > limit;
+  const items = hasMore ? rows.slice(0, limit) : rows;
+  const last = items[items.length - 1];
+  const nextCursor = hasMore && last ? encodeAuditCursor(last.created_at, last.id) : null;
+  return { items: items.map(mapAuditLog), nextCursor };
 }
 ```
 
@@ -1974,12 +2073,17 @@ export const authMiddleware = createMiddleware<{ Bindings: Env; Variables: Conte
     if (!payload) {
       throw unauthorized('Invalid token');
     }
+    // 同时注入 user 对象与扁平便捷字段，路由层用 c.var.userId / c.var.prunUsername 等
     c.set('user', {
       sub: payload.sub,
       prun_username: payload.prun_username,
       company_code: payload.company_code,
       role: payload.role,
     });
+    c.set('userId', payload.sub);
+    c.set('prunUsername', payload.prun_username);
+    c.set('companyCode', payload.company_code);
+    c.set('role', payload.role);
     await next();
   },
 );
@@ -2013,12 +2117,21 @@ import { incrementBucket } from '../db/repositories/rate-limits.repo';
 import { HttpError } from '../utils/http-error';
 import type { Env } from '../config';
 
-export function rateLimit(action: string, limitPerWindow: number, windowSeconds: number) {
+export interface RateLimitOptions {
+  // 窗口名（与 IP 拼成 bucket_key）
+  key: string;
+  // 窗口内允许的最大请求数
+  max: number;
+  // 窗口长度（秒）；架构 §12.9 限流策略为按小时，故典型值 3600
+  window: number;
+}
+
+export function rateLimit(opts: RateLimitOptions) {
   return createMiddleware<{ Bindings: Env }>(async (c, next) => {
     const ip = c.req.header('CF-Connecting-IP') || 'unknown';
-    const bucketKey = `${action}:${ip}:${Math.floor(Date.now() / 1000 / windowSeconds)}`;
-    const count = await incrementBucket(c.env.DB, bucketKey, windowSeconds);
-    if (count > limitPerWindow) {
+    const bucketKey = `${opts.key}:${ip}:${Math.floor(Date.now() / 1000 / opts.window)}`;
+    const count = await incrementBucket(c.env.DB, bucketKey, opts.window);
+    if (count > opts.max) {
       throw new HttpError(429, 'RATE_LIMITED', 'Too many requests');
     }
     await next();
@@ -2141,6 +2254,26 @@ export const createNoteSchema = z.object({
 export const generateInviteCodesSchema = z.object({
   count: z.number().int().min(1).max(50),
   createdBy: z.string().min(1).max(64),
+});
+
+// GET /tasks?scope=&type=&publisherUsername=&claimerUsername=&location=&since=&limit=&cursor=
+export const listTasksQuerySchema = z.object({
+  scope: z.enum(['board', 'published', 'claimed']),
+  type: z.enum(['BUY', 'SELL', 'SHIP', 'LOAN']).optional(),
+  publisherUsername: z.string().min(1).max(64).optional(),
+  claimerUsername: z.string().min(1).max(64).optional(),
+  location: z.string().min(1).max(64).optional(),
+  since: z.string().min(1).max(64).optional(),
+  limit: z.coerce.number().int().min(1).max(500).optional(),
+  cursor: z.string().min(1).max(64).optional(),
+});
+
+// GET /board/audit-logs?limit=&cursor=&action=&actorId=
+export const listAuditLogsQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(500).optional(),
+  cursor: z.string().min(1).max(64).optional(),
+  action: z.string().min(1).max(64).optional(),
+  actorId: z.string().min(1).max(64).optional(),
 });
 ```
 
@@ -2444,12 +2577,17 @@ export async function patchTask(
   if (row.status !== 'PUBLISHED') {
     throw badRequest('INVALID_TRANSITION', 'Can only edit PUBLISHED tasks');
   }
+  // expiresAt 处理三态：
+  //   - undefined：不更新
+  //   - null：显式清空（置 NULL）
+  //   - string：更新为 ISO 时间
+  // contractJson 与 expiresAt 可独立或同时更新；同时更新时一并传入。
   if (updates.contractJson) {
     await updateTaskContractJson(
       env.DB,
       taskId,
       updates.contractJson,
-      updates.expiresAt === null ? undefined : updates.expiresAt,
+      updates.expiresAt === undefined ? undefined : updates.expiresAt,
     );
   } else if (updates.expiresAt !== undefined) {
     await env.DB
@@ -2457,9 +2595,51 @@ export async function patchTask(
       .bind(updates.expiresAt, taskId)
       .run();
   }
+  await writeAuditLog(env.DB, {
+    actorType: 'user',
+    actorId: userId,
+    action: 'task.patch',
+    targetType: 'task',
+    targetId: taskId,
+    metadata: {
+      has_contract_json: !!updates.contractJson,
+      expiresAt: updates.expiresAt === undefined ? undefined : updates.expiresAt === null ? 'null' : 'set',
+    },
+  });
   const updated = await findTaskRowById(env.DB, taskId);
   if (!updated) throw new HttpError(500, 'INTERNAL_ERROR', 'Task not found after update');
   return mapTask(updated);
+}
+
+// 列表查询：从 tasks.repo 转发到 service 层，便于未来加业务过滤或权限裁剪
+// 注意：'published' 与 'claimed' scope 会强制按当前 userId 过滤
+export async function listTasksForUser(
+  env: Env,
+  userId: string,
+  filter: {
+    scope: 'board' | 'published' | 'claimed';
+    type?: string;
+    publisherUsername?: string;
+    claimerUsername?: string;
+    location?: string;
+    since?: string;
+    limit?: number;
+    cursor?: string;
+  },
+): Promise<{ items: OrgTask[]; nextCursor: string | null }> {
+  const { listTasks } = await import('../db/repositories/tasks.repo');
+  // 'published' / 'claimed' scope 隐含按当前用户过滤；'board' scope 不带 userId 限制
+  return listTasks(env.DB, {
+    scope: filter.scope,
+    userId,
+    type: filter.type as never,
+    publisherUsername: filter.publisherUsername,
+    claimerUsername: filter.claimerUsername,
+    location: filter.location,
+    since: filter.since,
+    limit: filter.limit,
+    cursor: filter.cursor,
+  });
 }
 
 export async function claimTask(
@@ -2803,6 +2983,13 @@ export async function demoteUser(
   const user = await findUserById(env.DB, targetUserId);
   if (!user) throw notFound('User not found');
   if (user.role === 'COLLABORATOR') return user; // 幂等
+  // 防止把最后一个 BOARD 降级（避免组织无人可管理）
+  const boardCount = await env.DB
+    .prepare("SELECT COUNT(*) AS cnt FROM users WHERE role = 'BOARD'")
+    .first<{ cnt: number }>();
+  if ((boardCount?.cnt ?? 0) <= 1) {
+    throw badRequest('LAST_BOARD', 'Cannot demote the last BOARD user');
+  }
   await updateUserRole(env.DB, targetUserId, 'COLLABORATOR');
   await writeAuditLog(env.DB, {
     actorType: 'user',
@@ -2830,6 +3017,7 @@ import type { AuditLog } from '../types';
 import {
   listAuditLogs,
   type ListAuditLogsFilter,
+  type ListAuditLogsResult,
 } from '../db/repositories/audit-logs.repo';
 import { countAllTasks, countTasksByStatus } from '../db/repositories/tasks.repo';
 import { countUsersByRole } from '../db/repositories/users.repo';
@@ -2837,7 +3025,7 @@ import { countUsersByRole } from '../db/repositories/users.repo';
 export async function queryAuditLogs(
   env: Env,
   filter: ListAuditLogsFilter,
-): Promise<AuditLog[]> {
+): Promise<ListAuditLogsResult> {
   return listAuditLogs(env.DB, filter);
 }
 
@@ -2886,7 +3074,6 @@ git commit -m "feat: add invite/audit services"
 // src/routes/auth.ts
 import { Hono } from 'hono';
 import type { Env } from '../config';
-import { z } from 'zod';
 import { registerSchema, loginSchema, refreshSchema, logoutSchema } from '../utils/validation';
 import {
   registerWithInvite,
@@ -2902,8 +3089,8 @@ import { apiError } from '../utils/http-error';
 const auth = new Hono<{ Bindings: Env }>();
 
 // POST /auth/register
-// 公开端点 + 限流（每 IP 每分钟 5 次）
-auth.post('/register', rateLimit({ window: 60, max: 5, key: 'register' }), async (c) => {
+// 公开端点 + 限流（每 IP 每小时 5 次，架构 §12.9）
+auth.post('/register', rateLimit({ window: 3600, max: 5, key: 'register' }), async (c) => {
   const body = await c.req.json();
   const parsed = registerSchema.safeParse(body);
   if (!parsed.success) {
@@ -2914,8 +3101,8 @@ auth.post('/register', rateLimit({ window: 60, max: 5, key: 'register' }), async
 });
 
 // POST /auth/login
-// 公开端点 + 限流（每 IP 每分钟 10 次）
-auth.post('/login', rateLimit({ window: 60, max: 10, key: 'login' }), async (c) => {
+// 公开端点 + 限流（每 IP 每小时 20 次，架构 §12.9）
+auth.post('/login', rateLimit({ window: 3600, max: 20, key: 'login' }), async (c) => {
   const body = await c.req.json();
   const parsed = loginSchema.safeParse(body);
   if (!parsed.success) {
@@ -2927,7 +3114,7 @@ auth.post('/login', rateLimit({ window: 60, max: 10, key: 'login' }), async (c) 
 
 // POST /auth/refresh
 // 公开端点（用 refreshToken 换 accessToken），限流防爆破
-auth.post('/refresh', rateLimit({ window: 60, max: 20, key: 'refresh' }), async (c) => {
+auth.post('/refresh', rateLimit({ window: 3600, max: 60, key: 'refresh' }), async (c) => {
   const body = await c.req.json();
   const parsed = refreshSchema.safeParse(body);
   if (!parsed.success) {
@@ -2938,14 +3125,14 @@ auth.post('/refresh', rateLimit({ window: 60, max: 20, key: 'refresh' }), async 
 });
 
 // POST /auth/logout
-// 公开端点（token 已无效时也返回 204，幂等）
-auth.post('/logout', async (c) => {
+// 需要登录：service 会校验 refreshToken 归属于当前 userId（防止越权吊销他人 token）
+auth.post('/logout', authMiddleware, async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const parsed = logoutSchema.safeParse(body);
   if (!parsed.success) {
     throw apiError('VALIDATION_ERROR', parsed.error.issues[0].message, 400);
   }
-  await logout(c.env, parsed.data.refreshToken);
+  await logout(c.env, parsed.data.refreshToken, c.var.userId);
   return c.body(null, 204);
 });
 
@@ -2982,7 +3169,6 @@ git commit -m "feat: add auth routes (register/login/refresh/logout/me)"
 // src/routes/tasks.ts
 import { Hono } from 'hono';
 import type { Env } from '../config';
-import { z } from 'zod';
 import { authMiddleware } from '../middleware/jwt';
 import {
   createTaskSchema,
@@ -2996,7 +3182,6 @@ import {
 import { apiError } from '../utils/http-error';
 import {
   createTask,
-  getTask,
   getTaskForUser,
   listTasksForUser,
   patchTask,
@@ -3005,8 +3190,8 @@ import {
   cancelTask,
   linkContract,
 } from '../services/task-service';
-import { syncContractStatus } from '../services/contract-sync-service';
-import { listNotes, createNote } from '../db/repositories/notes.repo';
+import { syncTaskFromContract } from '../services/contract-sync-service';
+import { listNotesByTask, createNote } from '../db/repositories/notes.repo';
 
 const tasks = new Hono<{ Bindings: Env }>();
 
@@ -3026,7 +3211,7 @@ tasks.get('/', async (c) => {
 
 // GET /tasks/:id
 tasks.get('/:id', async (c) => {
-  const task = await getTaskForUser(c.env, c.var.userId, c.req.param('id'));
+  const task = await getTaskForUser(c.env, c.req.param('id'), c.var.userId);
   return c.json(task, 200);
 });
 
@@ -3037,7 +3222,13 @@ tasks.post('/', async (c) => {
   if (!parsed.success) {
     throw apiError('VALIDATION_ERROR', parsed.error.issues[0].message, 400);
   }
-  const task = await createTask(c.env, c.var.userId, parsed.data);
+  const task = await createTask(
+    c.env,
+    c.var.userId,
+    c.var.prunUsername,
+    c.var.companyCode,
+    parsed.data,
+  );
   return c.json(task, 201);
 });
 
@@ -3048,19 +3239,25 @@ tasks.patch('/:id', async (c) => {
   if (!parsed.success) {
     throw apiError('VALIDATION_ERROR', parsed.error.issues[0].message, 400);
   }
-  const task = await patchTask(c.env, c.var.userId, c.req.param('id'), parsed.data);
+  const task = await patchTask(c.env, c.req.param('id'), c.var.userId, parsed.data);
   return c.json(task, 200);
 });
 
 // POST /tasks/:id/claim
 tasks.post('/:id/claim', async (c) => {
-  const task = await claimTask(c.env, c.var.userId, c.req.param('id'));
+  const task = await claimTask(
+    c.env,
+    c.req.param('id'),
+    c.var.userId,
+    c.var.prunUsername,
+    c.var.companyCode,
+  );
   return c.json(task, 200);
 });
 
 // POST /tasks/:id/release
 tasks.post('/:id/release', async (c) => {
-  const task = await releaseTask(c.env, c.var.userId, c.req.param('id'));
+  const task = await releaseTask(c.env, c.req.param('id'), c.var.userId);
   return c.json(task, 200);
 });
 
@@ -3072,7 +3269,14 @@ tasks.post('/:id/cancel', async (c) => {
   if (!parsed.success) {
     throw apiError('VALIDATION_ERROR', parsed.error.issues[0].message, 400);
   }
-  const task = await cancelTask(c.env, c.var.userId, c.req.param('id'), parsed.data.reason);
+  // BOARD 可取消他人任务；COLLABORATOR 仅可取消自己发布的。service 内部做权限判定
+  const task = await cancelTask(
+    c.env,
+    c.req.param('id'),
+    c.var.userId,
+    c.var.role,
+    parsed.data.reason,
+  );
   return c.json(task, 200);
 });
 
@@ -3083,7 +3287,13 @@ tasks.post('/:id/link-contract', async (c) => {
   if (!parsed.success) {
     throw apiError('VALIDATION_ERROR', parsed.error.issues[0].message, 400);
   }
-  const task = await linkContract(c.env, c.var.userId, c.req.param('id'), parsed.data);
+  const task = await linkContract(
+    c.env,
+    c.req.param('id'),
+    c.var.userId,
+    parsed.data.contractId,
+    parsed.data.contractCreator,
+  );
   return c.json(task, 200);
 });
 
@@ -3094,15 +3304,20 @@ tasks.post('/:id/sync-status', async (c) => {
   if (!parsed.success) {
     throw apiError('VALIDATION_ERROR', parsed.error.issues[0].message, 400);
   }
-  const task = await syncContractStatus(c.env, c.var.userId, c.req.param('id'), parsed.data.contractStatus);
+  const task = await syncTaskFromContract(
+    c.env,
+    c.req.param('id'),
+    parsed.data.contractStatus,
+    c.var.userId,
+  );
   return c.json(task, 200);
 });
 
 // GET /tasks/:id/notes
 tasks.get('/:id/notes', async (c) => {
   // 校验用户对该任务可见（同上 getTaskForUser）
-  await getTaskForUser(c.env, c.var.userId, c.req.param('id'));
-  const notes = await listNotes(c.env.DB, c.req.param('id'));
+  await getTaskForUser(c.env, c.req.param('id'), c.var.userId);
+  const notes = await listNotesByTask(c.env.DB, c.req.param('id'));
   return c.json(notes, 200);
 });
 
@@ -3114,7 +3329,7 @@ tasks.post('/:id/notes', async (c) => {
     throw apiError('VALIDATION_ERROR', parsed.error.issues[0].message, 400);
   }
   // 校验可见性 + 拿用户名
-  const task = await getTaskForUser(c.env, c.var.userId, c.req.param('id'));
+  const task = await getTaskForUser(c.env, c.req.param('id'), c.var.userId);
   const note = await createNote(
     c.env.DB,
     c.req.param('id'),
@@ -3151,7 +3366,6 @@ git commit -m "feat: add task routes (CRUD + state transitions + notes)"
 // src/routes/board.ts
 import { Hono } from 'hono';
 import type { Env } from '../config';
-import { z } from 'zod';
 import { authMiddleware } from '../middleware/jwt';
 import { boardOnly } from '../middleware/board-only';
 import { apiError } from '../utils/http-error';
@@ -3160,20 +3374,14 @@ import {
   listAuditLogsQuerySchema,
 } from '../utils/validation';
 import {
-  generateInviteCodes,
-  listInviteCodes,
-  revokeInviteCode,
-} from '../services/invite-service';
-import {
+  generateCodes,
+  listCodes,
+  revokeCode,
   listUsers,
   promoteUser,
   demoteUser,
-  listAuditLogs,
-  getStats,
-} from '../services/audit-service';
-import { getUserById, updateUserRole } from '../db/repositories/users.repo';
-import { writeAudit } from '../db/repositories/audit-logs.repo';
-import { mapUser } from '../db/mappers';
+} from '../services/invite-service';
+import { queryAuditLogs, getStats } from '../services/audit-service';
 
 const board = new Hono<{ Bindings: Env }>();
 
@@ -3182,41 +3390,31 @@ board.use('*', authMiddleware, boardOnly);
 
 // POST /board/invite-codes
 // body: { count, createdBy }
+// service 内部已写审计，路由不再重复
 board.post('/invite-codes', async (c) => {
   const body = await c.req.json();
   const parsed = generateInviteCodesSchema.safeParse(body);
   if (!parsed.success) {
     throw apiError('VALIDATION_ERROR', parsed.error.issues[0].message, 400);
   }
-  const codes = await generateInviteCodes(c.env, c.var.userId, parsed.data);
-  await writeAudit(c.env.DB, {
-    actorType: 'admin',
-    actorId: c.var.userId,
-    action: 'invite_codes.generate',
-    targetType: 'invite_code',
-    targetId: undefined,
-    metadata: { count: parsed.data.count },
-  });
+  const codes = await generateCodes(
+    c.env,
+    parsed.data.count,
+    parsed.data.createdBy,
+    c.var.userId,
+  );
   return c.json(codes, 201);
 });
 
 // GET /board/invite-codes
 board.get('/invite-codes', async (c) => {
-  const codes = await listInviteCodes(c.env);
+  const codes = await listCodes(c.env);
   return c.json(codes, 200);
 });
 
 // POST /board/invite-codes/:id/revoke
 board.post('/invite-codes/:id/revoke', async (c) => {
-  const code = await revokeInviteCode(c.env, c.var.userId, c.req.param('id'));
-  await writeAudit(c.env.DB, {
-    actorType: 'admin',
-    actorId: c.var.userId,
-    action: 'invite_code.revoke',
-    targetType: 'invite_code',
-    targetId: c.req.param('id'),
-    metadata: undefined,
-  });
+  const code = await revokeCode(c.env, c.req.param('id'), c.var.userId);
   return c.json(code, 200);
 });
 
@@ -3227,62 +3425,18 @@ board.get('/users', async (c) => {
 });
 
 // POST /board/users/:id/promote
+// service 幂等：已是 BOARD 直接返回 200
+// 注：不禁止"提升自己"——已经是 BOARD，再次提升无害且与 service 行为一致
 board.post('/users/:id/promote', async (c) => {
-  const targetId = c.req.param('id');
-  if (targetId === c.var.userId) {
-    throw apiError('CANNOT_PROMOTE_SELF', 'Cannot promote yourself', 400);
-  }
-  const target = await getUserById(c.env.DB, targetId);
-  if (!target) {
-    throw apiError('USER_NOT_FOUND', 'User not found', 404);
-  }
-  if (target.role === 'BOARD') {
-    throw apiError('ALREADY_BOARD', 'User is already BOARD', 409);
-  }
-  await updateUserRole(c.env.DB, targetId, 'BOARD');
-  const updated = await getUserById(c.env.DB, targetId);
-  await writeAudit(c.env.DB, {
-    actorType: 'admin',
-    actorId: c.var.userId,
-    action: 'user.promote',
-    targetType: 'user',
-    targetId,
-    metadata: { from: 'COLLABORATOR', to: 'BOARD' },
-  });
-  return c.json(mapUser(updated!), 200);
+  const user = await promoteUser(c.env, c.req.param('id'), c.var.userId);
+  return c.json(user, 200);
 });
 
 // POST /board/users/:id/demote
+// service 内部检查 CANNOT_DEMOTE_SELF + LAST_BOARD
 board.post('/users/:id/demote', async (c) => {
-  const targetId = c.req.param('id');
-  if (targetId === c.var.userId) {
-    throw apiError('CANNOT_DEMOTE_SELF', 'Cannot demote yourself', 400);
-  }
-  const target = await getUserById(c.env.DB, targetId);
-  if (!target) {
-    throw apiError('USER_NOT_FOUND', 'User not found', 404);
-  }
-  if (target.role === 'COLLABORATOR') {
-    throw apiError('ALREADY_COLLABORATOR', 'User is already COLLABORATOR', 409);
-  }
-  // 防止把自己降级成无 BOARD 状态（最后一个 BOARD 不能被降级）
-  const boardCount = await c.env.DB.prepare(
-    `SELECT COUNT(*) as cnt FROM users WHERE role = 'BOARD'`
-  ).first<{ cnt: number }>();
-  if (boardCount?.cnt === 1) {
-    throw apiError('LAST_BOARD', 'Cannot demote the last BOARD user', 409);
-  }
-  await updateUserRole(c.env.DB, targetId, 'COLLABORATOR');
-  const updated = await getUserById(c.env.DB, targetId);
-  await writeAudit(c.env.DB, {
-    actorType: 'admin',
-    actorId: c.var.userId,
-    action: 'user.demote',
-    targetType: 'user',
-    targetId,
-    metadata: { from: 'BOARD', to: 'COLLABORATOR' },
-  });
-  return c.json(mapUser(updated!), 200);
+  const user = await demoteUser(c.env, c.req.param('id'), c.var.userId);
+  return c.json(user, 200);
 });
 
 // GET /board/stats
@@ -3298,8 +3452,8 @@ board.get('/audit-logs', async (c) => {
   if (!parsed.success) {
     throw apiError('VALIDATION_ERROR', parsed.error.issues[0].message, 400);
   }
-  const logs = await listAuditLogs(c.env, parsed.data);
-  return c.json(logs, 200);
+  const result = await queryAuditLogs(c.env, parsed.data);
+  return c.json(result, 200);
 });
 
 export default board;
@@ -3386,9 +3540,19 @@ const app = new Hono<{ Bindings: Env }>();
 // 全局错误处理（必须在最前）
 app.onError(errorHandler);
 
-// CORS：允许扩展来源（开发期 *，生产期应限制为 moz-extension://* 和 chrome-extension://*）
+// CORS：架构 §12.14 仅允许 rprun 扩展 origin + 本地测试 origin
+// 浏览器扩展的 origin 形如 moz-extension://<UUID> 或 chrome-extension://<UUID>
+// UUID 随安装变化，故按 scheme 前缀放行；同时允许 localhost 用于本地 vitest
+const ALLOWED_ORIGIN_PREFIXES = [
+  'moz-extension://',
+  'chrome-extension://',
+];
+const isAllowedOrigin = (origin: string): boolean =>
+  ALLOWED_ORIGIN_PREFIXES.some(p => origin.startsWith(p)) ||
+  /^http:\/\/localhost(:\d+)?$/.test(origin);
+
 app.use('*', cors({
-  origin: (origin) => origin || '*',  // 浏览器扩展的 origin 形如 moz-extension://xxx
+  origin: (origin) => (origin && isAllowedOrigin(origin) ? origin : null),
   allowMethods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
   allowHeaders: ['Authorization', 'Content-Type'],
   exposeHeaders: ['Content-Length'],
@@ -3434,6 +3598,7 @@ crons = ["*/5 * * * *"]
 
 ```ts
 // 追加到 src/services/task-service.ts
+// 注意：writeAuditLog 已在 Task 13 文件顶部 import，直接复用
 export async function cleanupExpiredTasks(env: Env): Promise<void> {
   // 把所有 expires_at < now 且 status IN (PUBLISHED, AWAITING_CONTRACT) 的任务转 CANCELLED
   const result = await env.DB.prepare(
@@ -3446,7 +3611,7 @@ export async function cleanupExpiredTasks(env: Env): Promise<void> {
        AND status IN ('PUBLISHED', 'AWAITING_CONTRACT')`
   ).run();
   if (result.meta.changes > 0) {
-    await writeAudit(env.DB, {
+    await writeAuditLog(env.DB, {
       actorType: 'system',
       actorId: undefined,
       action: 'task.cleanup_expired',
@@ -3462,10 +3627,11 @@ export async function cleanupExpiredTasks(env: Env): Promise<void> {
 
 ```ts
 // 追加到 src/db/repositories/rate-limits.repo.ts
+// 注意：rate_limit_buckets 表只有 bucket_key/count/expires_at 字段（见 Task 7 schema）
 export async function cleanupRateLimitBuckets(db: D1Database): Promise<void> {
-  // 删除窗口已过期的桶（保留 1 小时便于审计）
+  // 删除已过期的桶（保留 1 小时便于审计）
   await db.prepare(
-    `DELETE FROM rate_limit_buckets WHERE window_end < datetime('now', '-1 hour')`
+    `DELETE FROM rate_limit_buckets WHERE expires_at < datetime('now', '-1 hour')`
   ).run();
 }
 ```
@@ -3500,15 +3666,10 @@ export const SCHEMA_SQL = readFileSync(
 );
 
 // 应用 schema 到测试 D1
+// D1 prepare() 只能执行单条语句；用 db.exec() 一次执行整个 schema
+// （exec 会按 SQLite 规则正确处理 trigger 内部的 ; ）
 export async function applySchema(env: Env): Promise<void> {
-  // D1 不支持一次执行多语句，按 ; 分割
-  const statements = SCHEMA_SQL
-    .split(';')
-    .map(s => s.trim())
-    .filter(s => s.length > 0 && !s.startsWith('--'));
-  for (const stmt of statements) {
-    await env.DB.prepare(stmt).run();
-  }
+  await env.DB.exec(SCHEMA_SQL);
 }
 
 // 清空所有表（每个测试前调用）
@@ -3520,16 +3681,24 @@ export async function truncateAll(env: Env): Promise<void> {
 }
 
 // 直接插入一个 BOARD 用户（绕过注册流程，用于测试 boardOnly 路由）
+// 注意：users.invite_code_id 为 NOT NULL UNIQUE（架构 §12.5），
+// 所以必须先插一行 invite_codes 再引用其 id（即使该码不会被使用）
 export async function seedBoardUser(env: Env, email = 'board@test.local'): Promise<{ id: string; email: string }> {
-  const id = crypto.randomUUID();
-  // 用 password.ts 的 hashPassword 算出 'password123' 的哈希（在 Worker 上下文外用 WebCrypto）
   const { hashPassword } = await import('../src/utils/password');
+  const { generateInviteCode } = await import('../src/utils/invite-code');
   const passwordHash = await hashPassword('password123');
+  const userId = crypto.randomUUID();
+  const inviteId = crypto.randomUUID();
+  // 生成一个不重复的码（10 位 base32），用于满足 users.invite_code_id 的外键/唯一约束
+  const code = generateInviteCode();
   await env.DB.prepare(
-    `INSERT INTO users (id, email, password_hash, prun_username, company_code, display_name, role)
-     VALUES (?, ?, ?, ?, ?, ?, 'BOARD')`
-  ).bind(id, email, passwordHash, 'board_user', 'BRC', 'Board User').run();
-  return { id, email };
+    `INSERT INTO invite_codes (id, code, created_by) VALUES (?, ?, ?)`,
+  ).bind(inviteId, code, userId).run();
+  await env.DB.prepare(
+    `INSERT INTO users (id, email, password_hash, prun_username, company_code, display_name, role, invite_code_id)
+     VALUES (?, ?, ?, ?, ?, ?, 'BOARD', ?)`,
+  ).bind(userId, email, passwordHash, 'board_user', 'BRC', 'Board User', inviteId).run();
+  return { id: userId, email };
 }
 ```
 
@@ -3540,7 +3709,7 @@ export async function seedBoardUser(env: Env, email = 'board@test.local'): Promi
 import { describe, it, expect, beforeEach } from 'vitest';
 import { env, SELF } from 'cloudflare:test';
 import { applySchema, truncateAll, seedBoardUser } from './setup';
-import { generateInviteCodes } from '../src/services/invite-service';
+import { generateCodes } from '../src/services/invite-service';
 
 describe('ORG backend integration', () => {
   beforeEach(async () => {
@@ -3553,7 +3722,8 @@ describe('ORG backend integration', () => {
     const board = await seedBoardUser(env, 'board@org.local');
 
     // 2. BOARD 生成邀请码
-    const codes = await generateInviteCodes(env, board.id, { count: 1, createdBy: board.id });
+    //    service 签名：generateCodes(env, count, createdBy, actorUserId)
+    const codes = await generateCodes(env, 1, board.id, board.id);
     expect(codes).toHaveLength(1);
     const inviteCode = codes[0].code;
 
@@ -3638,7 +3808,7 @@ describe('ORG backend integration', () => {
 
   it('non-board user gets 403 on /board/*', async () => {
     const board = await seedBoardUser(env, 'board@org.local');
-    const codes = await generateInviteCodes(env, board.id, { count: 1, createdBy: board.id });
+    const codes = await generateCodes(env, 1, board.id, board.id);
     const inviteCode = codes[0].code;
 
     // 注册 COLLABORATOR
@@ -3709,7 +3879,7 @@ describe('ORG backend integration', () => {
 
   it('refresh token rotation: old token invalid after refresh', async () => {
     const board = await seedBoardUser(env, 'board@org.local');
-    const codes = await generateInviteCodes(env, board.id, { count: 1, createdBy: board.id });
+    const codes = await generateCodes(env, 1, board.id, board.id);
     const reg = await SELF.fetch('http://localhost/auth/register', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -3740,31 +3910,36 @@ describe('ORG backend integration', () => {
     expect(retry.status).toBe(401);
   });
 
-  it('rate limit: 6th register in 1 minute → 429', async () => {
-    // 注册失败也会消耗桶（先消耗再校验 body），所以连续 6 次必然触发
+  it('rate limit: 6th register within 1 hour → 429', async () => {
+    // 架构 §12.9：register 限流 5/小时。第 6 次必然触发 429。
+    // 即使 body 校验失败也会消耗桶（rateLimit 中间件先于 body 解析）。
+    // inviteCode 用 'BADCREDENTIAL'（12 字符，不符合 ^[A-Z2-9]{10}$），
+    // 但 body 校验在限流之后，所以不影响 429 触发。
     for (let i = 0; i < 5; i++) {
       await SELF.fetch('http://localhost/auth/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: `x${i}@x`, password: 'p', inviteCode: 'BAD', prunUsername: 'u', companyCode: 'C' }),
+        body: JSON.stringify({ email: `x${i}@x`, password: 'p', inviteCode: 'BADCREDENTIAL', prunUsername: 'u', companyCode: 'C' }),
       });
     }
     const res = await SELF.fetch('http://localhost/auth/register', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: 'x5@x', password: 'p', inviteCode: 'BAD', prunUsername: 'u', companyCode: 'C' }),
+      body: JSON.stringify({ email: 'x5@x', password: 'p', inviteCode: 'BADCREDENTIAL', prunUsername: 'u', companyCode: 'C' }),
     });
     expect(res.status).toBe(429);
     expect((await res.json()).error.code).toBe('RATE_LIMITED');
   });
 
-  it('invalid invite code → 400', async () => {
+  it('invalid invite code → 400 INVITE_INVALID', async () => {
+    // inviteCode 必须先通过 schema ^[A-Z2-9]{10}$ 校验，才能进入 service 层做"是否存在"检查
+    // 'DOESNOTEXS' 正好 10 字符且全部在 [A-Z2-9] 范围内（D O E S N O T E X S）
     const res = await SELF.fetch('http://localhost/auth/register', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         email: 'x@x', password: 'password123',
-        inviteCode: 'DOESNOTEXIST', prunUsername: 'x', companyCode: 'X',
+        inviteCode: 'DOESNOTEXS', prunUsername: 'x', companyCode: 'X',
       }),
     });
     expect(res.status).toBe(400);
@@ -3773,27 +3948,9 @@ describe('ORG backend integration', () => {
 });
 ```
 
-- [ ] **Step 3: 写 `vitest.config.ts`（如 Task 4 未创建则在此创建）**
+- [ ] **Step 3: `vitest.config.ts` 已在 Task 4 创建并配置好 D1/KV/setupFiles，本步骤跳过**
 
-```ts
-// vitest.config.ts
-import { defineWorkersConfig } from '@cloudflare/vitest-pool-workers/config';
-
-export default defineWorkersConfig({
-  test: {
-    poolOptions: {
-      workers: {
-        wrangler: { configPath: './wrangler.toml' },
-        miniflare: {
-          d1Databases: ['DB'],
-          kvNamespaces: ['KV'],
-        },
-      },
-    },
-    setupFiles: ['./tests/setup.ts'],
-  },
-});
-```
+如需调整（例如增加 coverage 阈值），编辑同一份文件即可。
 
 - [ ] **Step 4: 运行测试**
 
@@ -3886,21 +4043,22 @@ pnpm wrangler kv namespace create KV
 
 \`\`\`bash
 pnpm wrangler secret put JWT_SECRET       # 至少 32 字节随机
-pnpm wrangler secret put INVITE_CODE_PEPPER  # 可选，增加邀请码熵
 \`\`\`
 
 `JWT_SECRET` 必须设置，否则 Worker 启动时所有鉴权请求都会失败。
 
-### 步骤 4: 部署 Worker
-
-\`\`\`bash
-pnpm deploy
-\`\`\`
-
-### 步骤 5: 应用 D1 schema 到生产
+### 步骤 4: 应用 D1 schema 到生产
 
 \`\`\`bash
 pnpm db:migrate
+\`\`\`
+
+> 必须先于 Worker 部署：Worker 启动后第一条请求就会查表，schema 未应用会导致 500。
+
+### 步骤 5: 部署 Worker
+
+\`\`\`bash
+pnpm deploy
 \`\`\`
 
 ### 步骤 6: 引导第一个 BOARD 用户
@@ -3908,13 +4066,20 @@ pnpm db:migrate
 ⚠️ **关键步骤**：第一个 BOARD 用户不能用邀请码注册（因为邀请码必须由 BOARD 生成）。直接用 SQL 插入：
 
 \`\`\`bash
-# 1. 在本地算出密码哈希（用 Worker 的 PBKDF2 算法，可用 node 脚本或临时 Worker）
-#    简单方式：本地启动 wrangler dev，调用 /auth/register 注册一个临时 BOARD（修改 register 逻辑默认为 BOARD 仅限 0 用户时），
-#    或者直接用 wrangler d1 execute 写入预计算的哈希。
+# 1. 在本地算出密码哈希（用 Worker 的 PBKDF2 算法）
+#    方式 A：本地 wrangler dev 起来后，调用 /auth/register 注册任意账号，
+#            然后 wrangler d1 execute rprun-org-db --local --command="SELECT password_hash FROM users WHERE email='...'"
+#    方式 B：写一次性 Worker 脚本调用 hashPassword('yourpassword') 输出哈希
 
 # 2. 写入 BOARD 用户（替换 <hash> 和 <email>/<prunUsername>/<companyCode>）
+#    注意：users.invite_code_id 是 NOT NULL UNIQUE，必须先插一行 invite_codes 再引用其 id
 pnpm wrangler d1 execute rprun-org-db --remote --command="
-INSERT INTO users (id, email, password_hash, prun_username, company_code, display_name, role)
+INSERT INTO invite_codes (id, code, created_by) VALUES (
+  lower(hex(randomblob(16))),
+  upper(substr(replace(hex(randomblob(8)), '0', 'A'), 1, 10)),
+  'bootstrap'
+);
+INSERT INTO users (id, email, password_hash, prun_username, company_code, display_name, role, invite_code_id)
 VALUES (
   lower(hex(randomblob(16))),
   'admin@your-org.local',
@@ -3922,7 +4087,8 @@ VALUES (
   'admin_user',
   'ADM',
   'Admin',
-  'BOARD'
+  'BOARD',
+  (SELECT id FROM invite_codes WHERE created_by = 'bootstrap' LIMIT 1)
 );
 "
 \`\`\`
@@ -3972,17 +4138,22 @@ pnpm deploy
 \`\`\`
 
 常见错误码：
-- `VALIDATION_ERROR` (400)
-- `INVITE_INVALID` (400)
-- `CANNOT_CLAIM_OWN` (400)
-- `CANNOT_DEMOTE_SELF` / `CANNOT_PROMOTE_SELF` (400)
-- `LAST_BOARD` (409)
-- `UNAUTHORIZED` (401)
-- `FORBIDDEN` (403)
+- `VALIDATION_ERROR` (400) — Zod schema 校验失败
+- `INVITE_INVALID` (400) — 邀请码不存在 / 已撤销 / 已使用
+- `INVITE_ALREADY_USED` (400) — 邀请码已被使用
+- `CANNOT_CLAIM_OWN` (400) — 不能接取自己发布的任务
+- `CANNOT_DEMOTE_SELF` (400) — 不能把自己降级
+- `LAST_BOARD` (400) — 不能降级最后一个 BOARD（service 层校验）
+- `INVALID_TRANSITION` (400) — 任务状态机不允许的转移
+- `CONTRACT_ALREADY_LINKED` (400) — 任务已绑定合同
+- `NO_CONTRACT_LINKED` (400) — 任务未绑定合同，无法 sync-status
+- `CODE_ALREADY_USED` (400) — 不能撤销已使用的邀请码
+- `UNAUTHORIZED` (401) — 未登录 / token 无效
+- `FORBIDDEN` (403) — 权限不足（如 COLLABORATOR 访问 /board/*）
 - `NOT_FOUND` (404)
-- `ALREADY_BOARD` / `ALREADY_COLLABORATOR` (409)
-- `INVALID_STATE_TRANSITION` (409)
 - `RATE_LIMITED` (429)
+
+> promote / demote 是幂等的：已是目标角色直接返回 200，不返回 ALREADY_* 错误。
 
 ## 架构决策
 
@@ -3990,9 +4161,9 @@ pnpm deploy
 
 ## 限流
 
-- `POST /auth/register`：每 IP 每分钟 5 次
-- `POST /auth/login`：每 IP 每分钟 10 次
-- `POST /auth/refresh`：每 IP 每分钟 20 次
+- `POST /auth/register`：每 IP 每小时 5 次（架构 §12.9）
+- `POST /auth/login`：每 IP 每小时 20 次
+- `POST /auth/refresh`：每 IP 每小时 60 次
 - 其他端点：通过 JWT 限流（未实现，留待后期）
 
 限流基于 D1 `rate_limit_buckets` 表（KV 写入限制不适用于高频限流）。Cron 每 5 分钟清理过期桶。
@@ -4025,9 +4196,11 @@ pnpm deploy  # 部署到 Cloudflare
 curl https://rprun-org-api.<sub>.workers.dev/health
 
 # 2. 错误的邀请码注册 → 400 INVITE_INVALID
+#    inviteCode 必须先通过 ^[A-Z2-9]{10}$ schema 校验才会进 service 检查"是否存在"
+#    'DOESNOTEXS' 正好 10 字符且全部在 [A-Z2-9] 范围内
 curl -X POST https://rprun-org-api.<sub>.workers.dev/auth/register \
   -H "Content-Type: application/json" \
-  -d '{"email":"x@x","password":"p","inviteCode":"BAD","prunUsername":"u","companyCode":"C"}'
+  -d '{"email":"x@x","password":"password123","inviteCode":"DOESNOTEXS","prunUsername":"u","companyCode":"C"}'
 
 # 3. 未带 token 访问 /tasks → 401 UNAUTHORIZED
 curl https://rprun-org-api.<sub>.workers.dev/tasks
