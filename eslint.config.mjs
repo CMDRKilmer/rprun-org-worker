@@ -81,6 +81,7 @@ export default ts.config(
       'src/types/unimport.d.ts',
       'scripts/**',
       'workers/**/*',
+      'rprun-org-worker/**/*',
       'old.ts',
     ],
   },
