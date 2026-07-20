@@ -78,28 +78,34 @@
 
 ---
 
-## 3. 任务状态机
+## 3. 任务状态机（合同驱动）
+
+> **修订（2026-07-19）**：原版 DRAFT→PUBLISHED→CLAIMED→COMPLETED 状态机已被合同驱动状态机取代。详见 `2026-07-18-org-client-impl.md` §7.2 与 `2026-07-19-org-backend-impl.md` §12.10。客户端 `src/infrastructure/org-api/types.ts` 的 `TaskStatus` 是权威定义。
 
 ```
-DRAFT ──publish──▶ PUBLISHED ──claim──▶ CLAIMED ──complete──▶ COMPLETED
-                       ▲                   │
-                       │                   └──release──▶ PUBLISHED
-                       │
-                       └──cancel──▶ CANCELLED
+                    ┌──claim──▶ AWAITING_CONTRACT ──link-contract──▶ IN_PROGRESS ──contract FULFILLED──▶ COMPLETED
+                    │                ▲
+PUBLISHED ──────────┤                │
+                    │                └──cancel──▶ CANCELLED
+                    │
+                    └──cancel──▶ CANCELLED
 ```
 
 | 状态 | 含义 | 触发者 |
 | -------- | -------- | -------- |
-| DRAFT | 发布者本地草稿，未推送到后端 | 发布者 |
-| PUBLISHED | 已发布，群内可见，等待接取 | 发布者点击 publish |
-| CLAIMED | 已被某用户接取，进行中 | 接取者点击 claim |
-| COMPLETED | 已完成（联动 CONTD 创建合约后由用户标记） | 接取者点击 complete |
-| CANCELLED | 发布者取消 | 发布者点击 cancel |
+| PUBLISHED | 已发布，群内可见，等待接取；可设 expiresAt 过期 | 发布者点击 publish |
+| AWAITING_CONTRACT | 已被接取，等待接取者或发布者创建并上报合同 | 接取者点击 claim |
+| IN_PROGRESS | 已上报 contractId 并监听合同状态 | 上报 contractId 后由 Worker 推进 |
+| COMPLETED | 合同 FULFILLED，Worker 自动推进 | 合同状态变化触发 |
+| CANCELLED | 发布者/BOARD 取消，或合同 CANCELLED/TERMINATED/BREACHED/REJECTED/DEADLINE_EXCEEDED | 发布者点击 cancel，或合同状态变化触发 |
 
 **状态转移规则：**
-- `publish` / `cancel`：仅发布者可触发
-- `claim` / `release`：任意非发布者可触发 `claim`；仅当前 claimer 可触发 `release`
-- `complete`：仅当前 claimer 可触发；触发后扩展先把 `contractJson` 推送到 CONTD，CONTD 完成合约创建后再向后端标记 COMPLETED
+- `publish` / `cancel`：仅发布者可触发（`cancel` 亦允许 BOARD 干预，详见 §12.21）
+- `claim`：任意非发布者可触发；推进到 AWAITING_CONTRACT
+- `release`：仅当前 claimer 可触发；从 AWAITING_CONTRACT 回到 PUBLISHED
+- `link-contract`：仅 publisher 或 claimer 可触发；上报 contractId + contractCreator
+- `sync-status`：仅 publisher 或 claimer 可触发；上报合同状态，Worker 内做幂等 + 合法性校验
+- `complete`：**不再由客户端主动触发**；改由合同状态变化自动推进（FULFILLED → COMPLETED）
 
 ---
 
@@ -107,34 +113,55 @@ DRAFT ──publish──▶ PUBLISHED ──claim──▶ CLAIMED ──comple
 
 ### 4.1 客户端类型（`src/infrastructure/org-api/types.ts`）
 
+> **修订（2026-07-19）**：以下类型与实际 `src/infrastructure/org-api/types.ts` 一致。Worker 端 `rprun-org-worker/src/types.ts` 通过人工同步保持对齐。
+
 ```ts
 // 邀请码制下的身份：username + companyCode 同时上报后端
 export interface OrgUser {
-  backendId: string;
-  prunUsername: string;       // 从 users store 读取
-  companyCode: string;        // 从 company store 读取
-  displayName: string;        // 显示名（默认 = prunUsername）
-  role: UserRole;             // 角色：BOARD（董事会）| COLLABORATOR（合作者）
-  createdAt: number;
+  id: string;                  // 后端 user.id（UUID）
+  email: string;               // 注册邮箱
+  prunUsername: string;        // 从 users store 读取
+  companyCode: string;         // 从 company store 读取
+  displayName: string;         // 显示名（默认 = prunUsername）
+  role: UserRole;              // 角色：BOARD（董事会）| COLLABORATOR（合作者）
+  createdAt: string;           // ISO 8601
+  lastLoginAt?: string;
 }
 
 // 用户角色（详见 §12.21 权限分层）
 export type UserRole = 'BOARD' | 'COLLABORATOR';
 
-// 会话：邮箱密码登录后后端返回
-export interface OrgSession {
-  token: string;              // access token（存 localStorage，详见 §7.5）
-  user: OrgUser;
-  expiresAt: number;
-}
-
 // 任务类型：BUY/SELL/SHIP 复用 CONTGEN；LOAN 占位
 export type TaskType = 'BUY' | 'SELL' | 'SHIP' | 'LOAN';
 
+// 合同创建方（架构 §3 状态机说明）
+export type ContractCreator = 'publisher' | 'claimer';
+
+// 任务状态（合同驱动状态机，详见 §3）
+export type TaskStatus =
+  | 'PUBLISHED'
+  | 'AWAITING_CONTRACT'
+  | 'IN_PROGRESS'
+  | 'COMPLETED'
+  | 'CANCELLED';
+
+// 会话：邮箱密码登录后后端返回（refresh token rotation）
+export interface AuthSession {
+  accessToken: string;         // JWT (HS256)，短期（15min）
+  refreshToken: string;        // 一次性，滚动续期
+  user: OrgUser;
+}
+
 // 复用 CONTGEN 的 ContractJson 结构（见 src/features/XIT/CONTGEN/CONTGEN.vue）
-// LOAN 类型的 contractJson 为占位结构，后期扩展
+// LOAN 类型暂不支持，contractJson.template 限 'BUY' | 'SELL' | 'SHIP'
+export interface TaskContractItem {
+  commodity: string;
+  amount: number;
+  price?: number;
+}
+
 export interface TaskContractJson {
-  template: TaskType;
+  template: 'BUY' | 'SELL' | 'SHIP';
   currency: string;
   name?: string;
   location?: string;
@@ -142,25 +169,88 @@ export interface TaskContractJson {
   destination?: string;
   price?: number;
   deadline?: number;
-  items: Array<{ commodity: string; amount: number; price?: number }>;
+  items: TaskContractItem[];
 }
-
-export type TaskStatus = 'DRAFT' | 'PUBLISHED' | 'CLAIMED' | 'COMPLETED' | 'CANCELLED';
 
 export interface OrgTask {
   id: string;
   type: TaskType;
   contractJson: TaskContractJson;
+  status: TaskStatus;
+  publisherId: string;
   publisherUsername: string;       // 发布者 PrUn username
   publisherCompanyCode: string;    // 发布者公司代码
-  claimerUsername?: string;        // 接取者 PrUn username（CLAIMED 时填充）
-  claimerCompanyCode?: string;     // 接取者公司代码
-  status: TaskStatus;
-  createdAt: number;
-  publishedAt?: number;
-  claimedAt?: number;
-  completedAt?: number;
+  claimerId?: string;
+  claimerUsername?: string;        // 接取者 PrUn username
+  claimerCompanyCode?: string;
+  contractId?: string;             // link-contract 后填充
+  contractCreator?: ContractCreator;
+  expiresAt?: string;              // PUBLISHED 过期时间（Cron 清理）
+  createdAt: string;
+  publishedAt?: string;
+  claimedAt?: string;
+  inProgressAt?: string;
+  completedAt?: string;
+  cancelledAt?: string;
+  updatedAt: string;
 }
+
+// 任务备注（架构 §4.1）
+export interface TaskNote {
+  id: string;
+  taskId: string;
+  authorId: string;
+  authorUsername: string;
+  content: string;
+  createdAt: string;
+}
+
+// 邀请码（架构 §12.4 invite_codes 表）
+export interface InviteCode {
+  id: string;
+  code: string;
+  createdBy: string;
+  createdAt: string;
+  usedByUserId?: string;
+  usedAt?: string;
+  revokedAt?: string;
+}
+
+// 审计日志（架构 §12.4 audit_logs 表）
+export interface AuditLog {
+  id: string;
+  actorType: 'user' | 'admin' | 'system';
+  actorId?: string;
+  action: string;
+  targetType?: string;
+  targetId?: string;
+  metadata?: Record<string, unknown>;
+  createdAt: string;
+}
+
+// API 错误响应（架构 §12.9 错误格式）
+export interface ApiError {
+  error: {
+    code: string;
+    message: string;
+  };
+}
+
+// 轮询游标
+export type PollScope = 'board' | 'published' | 'claimed';
+
+// PrUn 合同状态枚举（与 src/infrastructure/prun-api/data/contracts.types.d.ts 对齐）
+// 注意：必须用大写,与 PrUn API 实际推送一致
+export type PrunContractStatus =
+  | 'OPEN'
+  | 'CLOSED'
+  | 'CANCELLED'
+  | 'FULFILLED'
+  | 'PARTIALLY_FULFILLED'
+  | 'REJECTED'
+  | 'DEADLINE_EXCEEDED'
+  | 'BREACHED'
+  | 'TERMINATED';
 ```
 
 ### 4.2 后端数据模型（高层，待后端实现计划细化）
@@ -294,52 +384,58 @@ export function sendTaskToContd(contractJson: TaskContractJson) {
 客户端监听 `contractsStore` 中任务关联合同的状态变化，自动上报 Worker 推进任务状态：
 
 ```ts
-// contract-link.ts
+// contract-link.ts（实际实现,见 src/infrastructure/org-api/contract-link.ts）
 import { contractsStore } from '@src/infrastructure/prun-api/data/contracts';
+import type { OrgTask, PrunContractStatus } from './types';
+import { syncContractStatus } from './tasks';
 
-// 监听任务关联合同的状态
-function watchContractStatus(task: OrgTask) {
+const TRANSITION_STATUSES: ReadonlySet<PrunContractStatus> = new Set([
+  'CLOSED', 'FULFILLED', 'CANCELLED', 'TERMINATED', 'BREACHED',
+  'REJECTED', 'DEADLINE_EXCEEDED',
+]);
+
+// 调用方在 watchEffect 内调用以获得响应性
+export function watchContractStatus(task: OrgTask): void {
   if (!task.contractId) return;
+  if (task.status === 'COMPLETED' || task.status === 'CANCELLED') return;
   const contract = contractsStore.getById(task.contractId);
   if (!contract) return;
-
-  // 合同状态变化时上报 Worker
-  watchEffect(() => {
-    const status = contract.status.value;
-    if (hasStatusChanged(task.id, status)) {
-      api.post(`/tasks/${task.id}/sync-status`, { contractStatus: status });
-    }
-  });
+  const status = contract.status as PrunContractStatus;  // 注意: status 是 string,不是 ref
+  if (!TRANSITION_STATUSES.has(status)) return;
+  // ... 去重 + fire-and-forget syncContractStatus(task.id, status)
 }
-
-// 合同状态 → 任务状态映射（Worker 内 CONTRACT_STATUS_TO_TASK，详见 §12.10.3）
-// 状态名必须用大写，对齐客户端 types.ts 的 PrunContractStatus 与 PrUn contracts.types.d.ts
-// CLOSED      → IN_PROGRESS
-// FULFILLED   → COMPLETED
-// CANCELLED   → CANCELLED
-// BREACHED    → CANCELLED
-// TERMINATED  → CANCELLED
 ```
 
-**Worker 端校验**（详见 §12.10.3）：上报者必须是 publisher 或 claimer；contractId 必须与 task.contractId 匹配；状态转移必须合法（`canTransition`）。
+**合同状态枚举值必须用大写**（已修正）: `OPEN` / `CLOSED` / `CANCELLED` / `FULFILLED` / `PARTIALLY_FULFILLED` / `REJECTED` / `DEADLINE_EXCEEDED` / `BREACHED` / `TERMINATED`,对齐 `src/infrastructure/prun-api/data/contracts.types.d.ts` 与客户端 `types.ts` 的 `PrunContractStatus`。
+
+**合同状态 → 任务状态映射**（Worker 内 CONTRACT_STATUS_TO_TASK，详见 §12.10.3）：
+- `OPEN` → 不转移（合同未被接受）
+- `CLOSED` → `AWAITING_CONTRACT` → `IN_PROGRESS`
+- `PARTIALLY_FULFILLED` → 不转移（已 `IN_PROGRESS`）
+- `FULFILLED` → `IN_PROGRESS` → `COMPLETED`
+- `CANCELLED` / `TERMINATED` / `BREACHED` / `REJECTED` / `DEADLINE_EXCEEDED` → `CANCELLED`
+
+**Worker 端校验**（详见 §12.10.3）：上报者必须是 publisher 或 claimer；contractId 必须与 task.contractId 匹配；状态转移必须合法（`canTransition`）；幂等（同状态多次上报不重复推进）。
 
 **通知触发**：客户端轮询拉取到状态变化时（详见 §12.11），触发面板内 Badge + PrUn NOTS 双通道通知。
 
 ### 7.4 PrUn 用户名读取
 
+> **修正（2026-07-19）**：原版假设 `usersStore.current.value` / `companyStore.current.value` 形态错误。实际 store 形态已由客户端 plan §"架构计划修正"表格确认,以下为正确写法。
+
 ```ts
-// 从 users store 读取 username
+// 从 users store 读取 username（API 单用户推送,所以取 all[0]）
 import { usersStore } from '@src/infrastructure/prun-api/data/users';
-// 从 company store 读取公司代码
+// 从 company store 读取公司代码（companyStore 是 ShallowRef,不是 ref 嵌套）
 import { companyStore } from '@src/infrastructure/prun-api/data/company';
 
-const prunUsername = computed(() => usersStore.current.value?.username);
-const companyCode = computed(() => companyStore.current.value?.code);
+const prunUsername = computed(() => usersStore.all.value?.[0]?.username);
+const companyCode = computed(() => companyStore.value?.code);
 ```
 
-> **待确认**：`usersStore` / `companyStore` 的具体 API 形态需在客户端实现计划阶段读取实际 store 文件确认（当前架构文档仅示意）。
-
 **身份一致性校验**：登录后客户端校验 `/auth/me` 返回的 `prun_username` / `company_code` 与当前 PrUn 游戏内身份一致；不一致则 logout 并提示用户重新登录（防止 PrUn 账号切换后误用他人身份操作任务）。
+
+**contractsStore.getById 返回值**：返回普通对象（不是 ref），`status` 是字符串字段。需在 `watchEffect` 内调用以获得响应性（依赖 `state.all` 的 shallowReactive 触发）。
 
 ### 7.5 凭据存储（Cloudflare 方案已简化）
 

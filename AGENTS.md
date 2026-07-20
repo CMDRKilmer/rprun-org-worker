@@ -16,6 +16,15 @@ Before creating new features, prioritize searching for existing reusable modules
 
 Refined PrUn (rprun) is a browser extension for Prosperous Universe (PrUn) that enhances the game interface.
 
+### Sub-project: `rprun-org-worker/`
+
+独立 Cloudflare Worker 后端,为 XIT ORG 面板提供 REST API。pnpm workspace 隔离: **必须用 `pnpm install --ignore-workspace` 在该目录内安装依赖**,否则根 pnpm-workspace.yaml 会尝试把 Workers 类型注入主扩展构建。
+
+- 计划文档: `docs/superpowers/plans/2026-07-19-org-backend-impl.md`
+- 架构文档: `docs/superpowers/plans/2026-07-18-org-panel-architecture.md` §12
+- 客户端 API 封装: `src/infrastructure/org-api/`(类型与 Worker `src/types.ts` 人工同步)
+- 部署: 详见 `rprun-org-worker/README.md`(D1 + KV + Cron Triggers,免费档)
+
 ## THE MAIN FLOW
 
 Create the following to-do list immediately.

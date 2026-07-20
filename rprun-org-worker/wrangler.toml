@@ -1,0 +1,32 @@
+name = "rprun-org-api"
+main = "src/index.ts"
+compatibility_date = "2026-07-01"
+compatibility_flags = ["nodejs_compat"]
+
+# D1 数据库绑定
+[[d1_databases]]
+binding = "DB"
+database_name = "rprun-org-db"
+database_id = "<用 wrangler d1 create 生成后填入>"
+
+# KV 命名空间绑定（预留给未来会话黑名单等低频写场景；当前限流用 D1 表）
+[[kv_namespaces]]
+binding = "KV"
+id = "<用 wrangler kv:namespace create 生成后填入>"
+
+# Cron Triggers：每 5 分钟清理过期任务 + rate_limit_buckets
+[triggers]
+crons = ["*/5 * * * *"]
+
+# 非敏感环境变量
+[vars]
+ENV = "production"
+JWT_ACCESS_TTL = "900"
+JWT_REFRESH_TTL = "604800"
+RATE_LIMIT_REGISTER_PER_HOUR = "5"
+RATE_LIMIT_LOGIN_PER_HOUR = "20"
+POLL_INTERVAL_ADVICE = "30"
+
+# 敏感 secrets 用 wrangler secret put 设置：
+# wrangler secret put JWT_SECRET            # 32+ 字节随机
+# wrangler secret put REFRESH_TOKEN_SECRET  # 32+ 字节随机
