@@ -36,6 +36,7 @@ export const contractJsonSchema = z.object({
   origin: z.string().max(64).optional(),
   destination: z.string().max(64).optional(),
   price: z.number().nonnegative().optional(),
+  shipping: z.number().nonnegative().optional(),
   deadline: z.number().int().positive().optional(),
   items: z.array(contractItemSchema).min(1),
 });

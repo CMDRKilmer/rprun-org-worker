@@ -32,6 +32,9 @@ export interface TaskContractJson {
   origin?: string;
   destination?: string;
   price?: number;
+  // 运费：与 price 平级，独立于"货物总价"。publisher 发布任务时声明，
+  // 接取者在创建合同时把它叠加进合同总金额。存于 contract_json JSON 列。
+  shipping?: number;
   deadline?: number;
   items: TaskContractItem[];
 }
