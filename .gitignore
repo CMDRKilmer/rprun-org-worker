@@ -1,0 +1,39 @@
+# Node / pnpm
+node_modules/
+.pnpm-store/
+
+# Build output
+dist/
+build/
+out/
+
+# Wrangler / Cloudflare
+.wrangler/
+.dev.vars
+.mf/
+
+# Vitest / coverage
+coverage/
+*.lcov
+
+# Logs
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Env (per-device secrets)
+.env
+.env.local
+.env.*.local
+
+# OS
+.DS_Store
+
+# Misc
+*.tsbuildinfo
