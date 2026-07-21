@@ -16,6 +16,7 @@ import {
 import { apiError } from '../utils/http-error';
 import {
   createTask,
+  deleteTaskForPublisher,
   getTaskForUser,
   listTasksForUser,
   patchTask,
@@ -174,6 +175,19 @@ tasks.post('/:id/notes', async (c) => {
     parsed.data.content,
   );
   return c.json(note, 201 as ContentfulStatusCode);
+});
+
+// DELETE /tasks/:id
+// 物理删除：仅 publisher 可删自己发布的任务（service 内部校验）。
+// 返回删除前的快照 + 状态码 200，便于前端展示"已删除 ... "。
+// task_notes 通过 FK CASCADE 自动清理；audit_logs 保留（无 FK）。
+tasks.delete('/:id', async (c) => {
+  const snapshot = await deleteTaskForPublisher(
+    c.env,
+    c.req.param('id'),
+    c.var.userId,
+  );
+  return c.json(snapshot, 200 as ContentfulStatusCode);
 });
 
 export default tasks;

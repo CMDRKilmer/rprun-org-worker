@@ -8,6 +8,7 @@ import { mapTask } from '../db/mappers';
 import {
   claimTask as repoClaimTask,
   createTask as repoCreateTask,
+  deleteTask as repoDeleteTask,
   findTaskRowById,
   linkContract as repoLinkContract,
   releaseTask as repoReleaseTask,
@@ -263,6 +264,42 @@ export async function linkContract(
   const updated = await findTaskRowById(env.DB, taskId);
   if (!updated) throw new HttpError(500, 'INTERNAL_ERROR', 'Task not found after link');
   return mapTask(updated);
+}
+
+// 物理删除任务：仅 publisher 自己能删除自己发布的任务。
+// BOARD 不允许代删（取消他人任务已提供同等能力，删除是更强操作，需 owner 显式授权）。
+// 返回删除前的快照（便于返回给客户端展示"已删除 ... 任务"等）。
+export async function deleteTaskForPublisher(
+  env: Env,
+  taskId: string,
+  userId: string,
+): Promise<OrgTask> {
+  const row = await findTaskRowById(env.DB, taskId);
+  if (!row) throw notFound('Task not found');
+  if (row.publisher_id !== userId) {
+    throw forbidden('NOT_PUBLISHER');
+  }
+  // 先写审计（删除事件本身），再删主表。即使主表 DELETE 失败，审计记录在，
+  // 便于后续运营/排障。
+  await writeAuditLog(env.DB, {
+    actorType: 'user',
+    actorId: userId,
+    action: 'task.delete',
+    targetType: 'task',
+    targetId: taskId,
+    metadata: {
+      type: row.type,
+      status: row.status,
+      had_contract: !!row.contract_id,
+      had_claimer: !!row.claimer_id,
+    },
+  });
+  const snapshot = mapTask(row);
+  const affected = await repoDeleteTask(env.DB, taskId);
+  if (affected !== 1) {
+    throw new HttpError(500, 'INTERNAL_ERROR', 'Task vanished during delete');
+  }
+  return snapshot;
 }
 
 // 隔离校验：所有读取任务详情的请求都先校验参与方身份

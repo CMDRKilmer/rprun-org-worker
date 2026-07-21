@@ -226,6 +226,17 @@ export async function linkContract(
     .run();
 }
 
+// 物理删除任务。task_notes 通过 FK ON DELETE CASCADE 自动清理；
+// audit_logs 无 FK（target_id 是软引用），保留作为历史审计轨迹。
+// 返回 rows affected（1 = 删成功，0 = 行不存在）。
+export async function deleteTask(
+  db: D1Database,
+  taskId: string,
+): Promise<number> {
+  const result = await db.prepare('DELETE FROM tasks WHERE id = ?').bind(taskId).run();
+  return result.meta.changes ?? 0;
+}
+
 export async function setTaskStatus(
   db: D1Database,
   taskId: string,
