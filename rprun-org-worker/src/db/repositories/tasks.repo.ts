@@ -199,6 +199,7 @@ export async function claimTask(
 
 export async function releaseTask(db: D1Database, taskId: string): Promise<void> {
   // 释放后任务重新进入 PUBLISHED：重置 published_at 以便客户端"最新发布"排序
+  // 同时清空 contract_id 与 contract_creator：合同已随发布者重新发布而失效，旧关联不应保留
   // （trigger trg_tasks_touch_updated_at 已自动更新 updated_at）
   const now = new Date().toISOString();
   await db
@@ -206,7 +207,7 @@ export async function releaseTask(db: D1Database, taskId: string): Promise<void>
       `UPDATE tasks
        SET status = 'PUBLISHED',
            claimer_id = NULL, claimer_username = NULL, claimer_company_code = NULL,
-           contract_creator = NULL, claimed_at = NULL,
+           contract_id = NULL, contract_creator = NULL, claimed_at = NULL,
            published_at = ?
        WHERE id = ?`,
     )
