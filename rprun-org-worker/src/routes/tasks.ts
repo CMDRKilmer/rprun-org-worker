@@ -9,6 +9,7 @@ import {
   patchTaskSchema,
   cancelTaskSchema,
   linkContractSchema,
+  matchContractSchema,
   syncStatusSchema,
   listTasksQuerySchema,
   createNoteSchema,
@@ -26,6 +27,7 @@ import {
   republishTask,
   linkContract,
 } from '../services/task-service';
+import { matchContract } from '../services/match-contract-service';
 import { syncTaskFromContract } from '../services/contract-sync-service';
 import { listNotesByTask, createNote } from '../db/repositories/notes.repo';
 
@@ -139,6 +141,21 @@ tasks.post('/:id/link-contract', async (c) => {
     parsed.data.contractCreator,
   );
   return c.json(task, 200 as ContentfulStatusCode);
+});
+
+// POST /tasks/:id/match-contract
+// 前端轮询 PrUn contractsStore 命中指纹后上报本端点做权威比对。
+// 始终返回 200 + { matched, reason?, task? }，由前端根据 matched 决定
+// 是否再调 link-contract（autoLink=false）或由后端直接关联（autoLink=true）。
+// 业务错误（不在 AWAITING_CONTRACT 等）按既有模式抛 apiError → errorHandler 翻译 4xx。
+tasks.post('/:id/match-contract', async (c) => {
+  const body = await c.req.json();
+  const parsed = matchContractSchema.safeParse(body);
+  if (!parsed.success) {
+    throw apiError('VALIDATION_ERROR', parsed.error.issues[0].message, 400);
+  }
+  const result = await matchContract(c.env, c.req.param('id'), c.var.userId, parsed.data);
+  return c.json(result, 200 as ContentfulStatusCode);
 });
 
 // POST /tasks/:id/sync-status

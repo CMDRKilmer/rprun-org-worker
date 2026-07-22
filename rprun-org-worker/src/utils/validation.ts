@@ -61,6 +61,25 @@ export const linkContractSchema = z.object({
   contractCreator: z.enum(['publisher', 'claimer']),
 });
 
+// 自动关联合同方案的 fingerprint 上报 schema。
+// 形状与前端 ContractFingerprint（RUNCN/src/infrastructure/org-api/contract-link.ts）
+// 完全一致——前端负责把 PrUnApi.Contract 投影成该形状，本服务做权威比对。
+export const matchContractSchema = z.object({
+  contractId: z.string().min(1).max(64),
+  fingerprint: z.object({
+    template: z.enum(['BUY', 'SELL', 'SHIP']),
+    currency: z.string().min(1).max(8),
+    items: z.array(contractItemSchema).min(1),
+    location: z.string().max(64).optional(),
+    origin: z.string().max(64).optional(),
+    destination: z.string().max(64).optional(),
+    price: z.number().nonnegative().optional(),
+  }),
+  // 可选：前端希望后端在匹配成功后自动调 link-contract；缺省 false，
+  // 前端仍按原 link-contract 端点走（保持与既有流程一致，避免双重调用）。
+  autoLink: z.boolean().optional(),
+});
+
 export const syncStatusSchema = z.object({
   contractStatus: z.enum([
     'OPEN', 'CLOSED', 'CANCELLED', 'FULFILLED',
