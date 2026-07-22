@@ -20,6 +20,7 @@ export interface OrgStats {
   taskCount: number;
   boardCount: number;
   collaboratorCount: number;
+  nonOrgUserCount: number;
   tasksByStatus: Record<string, number>;
 }
 
@@ -34,6 +35,7 @@ export async function getStats(env: Env): Promise<OrgStats> {
     taskCount,
     boardCount: userCounts.boardCount,
     collaboratorCount: userCounts.collaboratorCount,
+    nonOrgUserCount: userCounts.nonOrgUserCount,
     tasksByStatus,
   };
 }

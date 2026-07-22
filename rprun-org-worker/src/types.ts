@@ -2,7 +2,7 @@
 // 与 rprun 扩展 src/infrastructure/org-api/types.ts 人工同步。
 // 修改任一处都必须同步另一处。
 
-export type UserRole = 'BOARD' | 'COLLABORATOR';
+export type UserRole = 'BOARD' | 'COLLABORATOR' | 'NON_ORG';
 export type TaskType = 'BUY' | 'SELL' | 'SHIP' | 'LOAN';
 export type TaskStatus = 'PUBLISHED' | 'AWAITING_CONTRACT' | 'IN_PROGRESS' | 'COMPLETED' | 'CANCELLED';
 export type ContractCreator = 'publisher' | 'claimer';
@@ -13,7 +13,7 @@ export interface OrgUser {
   prunUsername: string;
   companyCode: string;
   displayName: string;
-  role: UserRole;
+  role: RegisteredUserRole;
   createdAt: string;
   lastLoginAt?: string;
 }
@@ -115,10 +115,13 @@ export interface JwtPayload {
   sub: string;
   prun_username: string;
   company_code: string;
-  role: UserRole;
+  role: RegisteredUserRole;
   iat: number;
   exp: number;
 }
+
+// 注册用户角色（authMiddleware 注入的角色）
+export type RegisteredUserRole = 'BOARD' | 'COLLABORATOR';
 
 // Hono Context variables（authMiddleware 注入）
 export interface ContextVars {
@@ -126,11 +129,11 @@ export interface ContextVars {
     sub: string;
     prun_username: string;
     company_code: string;
-    role: UserRole;
+    role: RegisteredUserRole;
   };
   // 便捷字段：等价于 user.sub，路由层直接 c.var.userId 取用
   userId: string;
   prunUsername: string;
   companyCode: string;
-  role: UserRole;
+  role: RegisteredUserRole;
 }

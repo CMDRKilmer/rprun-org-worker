@@ -19,8 +19,26 @@ import {
   demoteUser,
 } from '../services/invite-service';
 import { queryAuditLogs, getStats } from '../services/audit-service';
+import { reportExtensionUser } from '../services/extension-user-service';
 
 const board = new Hono<{ Bindings: Env; Variables: ContextVars }>();
+
+// POST /board/users/report
+// 免登录：扩展用户上报接口
+// body: { prunUsername, companyCode, displayName }
+board.post('/users/report', async (c) => {
+  const body = await c.req.json();
+  if (!body.prunUsername || !body.companyCode) {
+    throw apiError('VALIDATION_ERROR', 'prunUsername and companyCode are required', 400);
+  }
+  await reportExtensionUser(
+    c.env,
+    body.prunUsername,
+    body.companyCode,
+    body.displayName || body.prunUsername,
+  );
+  return c.json({ success: true }, 201 as ContentfulStatusCode);
+});
 
 // 全部 /board/* 路由都需要 BOARD 角色
 board.use('*', authMiddleware, boardOnly);

@@ -1,6 +1,6 @@
 // src/services/invite-service.ts
 import type { Env } from '../config';
-import type { InviteCode, OrgUser } from '../types';
+import type { InviteCode, OrgUser, RegisteredUserRole } from '../types';
 import { badRequest, notFound } from '../utils/http-error';
 import {
   createInviteCodes,
@@ -12,6 +12,7 @@ import {
   updateUserRole,
   findUserById,
   listAllUsers,
+  type ExtendedOrgUser,
 } from '../db/repositories/users.repo';
 import { writeAuditLog } from '../db/repositories/audit-logs.repo';
 
@@ -114,6 +115,6 @@ export async function demoteUser(
   return updated;
 }
 
-export async function listUsers(env: Env): Promise<OrgUser[]> {
+export async function listUsers(env: Env): Promise<ExtendedOrgUser[]> {
   return listAllUsers(env.DB);
 }
