@@ -12,6 +12,7 @@ import {
   findTaskRowById,
   linkContract as repoLinkContract,
   releaseTask as repoReleaseTask,
+  republishTask as repoRepublishTask,
   setTaskStatus,
   updateTaskContractJson,
   type CreateTaskInput,
@@ -74,8 +75,10 @@ export async function patchTask(
   if (row.publisher_id !== userId) {
     throw forbidden('Only the publisher can edit');
   }
-  if (row.status !== 'PUBLISHED') {
-    throw badRequest('INVALID_TRANSITION', 'Can only edit PUBLISHED tasks');
+  // 允许 PUBLISHED 或 CANCELLED 编辑：CANCELLED 状态下允许 publisher 编辑后重新发布。
+  // 其他状态（AWAITING_CONTRACT / IN_PROGRESS / COMPLETED）禁止修改合同。
+  if (row.status !== 'PUBLISHED' && row.status !== 'CANCELLED') {
+    throw badRequest('INVALID_TRANSITION', 'Can only edit PUBLISHED or CANCELLED tasks');
   }
   // expiresAt 处理三态：
   //   - undefined：不更新
@@ -231,6 +234,31 @@ export async function cancelTask(
   });
   const updated = await findTaskRowById(env.DB, taskId);
   if (!updated) throw new HttpError(500, 'INTERNAL_ERROR', 'Task not found after cancel');
+  return mapTask(updated);
+}
+
+// 重新发布：CANCELLED → PUBLISHED。仅 publisher 自己可以重新发布。
+// 重新发布后任务回到"待接取"状态；claim / contract 等旧信息一并清空。
+// contractJson / expiresAt 保留：若想修改内容，先 patch 再 republish；或 republish 后再 patch。
+export async function republishTask(env: Env, taskId: string, userId: string): Promise<OrgTask> {
+  const row = await findTaskRowById(env.DB, taskId);
+  if (!row) throw notFound('Task not found');
+  if (row.publisher_id !== userId) {
+    throw forbidden('Only the publisher can republish');
+  }
+  if (row.status !== 'CANCELLED') {
+    throw badRequest('INVALID_TRANSITION', `Cannot republish from ${row.status}`);
+  }
+  await repoRepublishTask(env.DB, taskId);
+  await writeAuditLog(env.DB, {
+    actorType: 'user',
+    actorId: userId,
+    action: 'task.republish',
+    targetType: 'task',
+    targetId: taskId,
+  });
+  const updated = await findTaskRowById(env.DB, taskId);
+  if (!updated) throw new HttpError(500, 'INTERNAL_ERROR', 'Task not found after republish');
   return mapTask(updated);
 }
 

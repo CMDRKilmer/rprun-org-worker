@@ -215,6 +215,24 @@ export async function releaseTask(db: D1Database, taskId: string): Promise<void>
     .run();
 }
 
+// 重新发布：CANCELLED → PUBLISHED。仅清空与取消无关的状态字段，
+// contractJson / expiresAt 保留以便发布者直接编辑或重新发布。
+// 若之后 patchTask 修改了内容，再发布等同于"重新发出"。
+export async function republishTask(db: D1Database, taskId: string): Promise<void> {
+  const now = new Date().toISOString();
+  await db
+    .prepare(
+      `UPDATE tasks
+       SET status = 'PUBLISHED',
+           claimer_id = NULL, claimer_username = NULL, claimer_company_code = NULL,
+           contract_id = NULL, contract_creator = NULL, claimed_at = NULL,
+           published_at = ?
+       WHERE id = ?`,
+    )
+    .bind(now, taskId)
+    .run();
+}
+
 export async function linkContract(
   db: D1Database,
   taskId: string,

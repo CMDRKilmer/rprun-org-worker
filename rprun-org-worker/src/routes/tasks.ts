@@ -23,6 +23,7 @@ import {
   claimTask,
   releaseTask,
   cancelTask,
+  republishTask,
   linkContract,
 } from '../services/task-service';
 import { syncTaskFromContract } from '../services/contract-sync-service';
@@ -112,6 +113,14 @@ tasks.post('/:id/cancel', async (c) => {
     c.var.role,
     parsed.data.reason,
   );
+  return c.json(task, 200 as ContentfulStatusCode);
+});
+
+// POST /tasks/:id/republish
+// 重新发布：CANCELLED → PUBLISHED。仅 publisher 自己可重新发布。
+// 前端典型用法：发布者取消自己的任务后想改点内容再发，直接 republish。
+tasks.post('/:id/republish', async (c) => {
+  const task = await republishTask(c.env, c.req.param('id'), c.var.userId);
   return c.json(task, 200 as ContentfulStatusCode);
 });
 
