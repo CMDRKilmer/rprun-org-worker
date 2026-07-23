@@ -1,7 +1,14 @@
-﻿name = "rprun-org-api"
+name = "rprun-org-api"
 main = "src/index.ts"
 compatibility_date = "2026-07-01"
 compatibility_flags = ["nodejs_compat"]
+
+# 自定义域名路由（前端 prun.kilmer.cn 调用）
+# 注意：需先在 Cloudflare DNS 添加 prun.kilmer.cn CNAME 指向 rprun-org-api.workers.dev
+# zone_name 用于路由；custom_domain = true 在首次绑定后由 Cloudflare 自动维护。
+routes = [
+  { pattern = "prun.kilmer.cn/*", zone_name = "kilmer.cn" },
+]
 
 # D1 数据库绑定
 [[d1_databases]]

@@ -10,8 +10,8 @@
 
 ## 快速链接
 
-- Worker URL: https://rprun-org-api.782444686.workers.dev
-- Health check: https://rprun-org-api.782444686.workers.dev/health
+- Worker URL: https://prun.kilmer.cn
+- Health check: https://prun.kilmer.cn/health
 - 前端集成仓库: `../RUNCN/`
 
 ## 引导第一个 BOARD 用户
