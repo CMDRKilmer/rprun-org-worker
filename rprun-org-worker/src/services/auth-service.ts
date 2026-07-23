@@ -72,12 +72,20 @@ export async function registerWithInvite(env: Env, params: RegisterParams): Prom
     ).bind(userId, inviteCode),
 
     // 2. 创建用户（INSERT 用子查询从 invite_codes 取 id；email/username UNIQUE 冲突会触发 batch 失败）
+    // 注：display_name 显式 bind prunUsername，因为 schema 里 `DEFAULT prun_username`
+    //     在 SQLite/D1 会被解释成字符串字面量（"prun_username"），不是列引用。
     env.DB.prepare(
-      `INSERT INTO users (id, email, password_hash, prun_username, company_code, invite_code_id)
-       VALUES (?, ?, ?, ?, ?, (SELECT id FROM invite_codes WHERE code = ?))`,
-    ).bind(userId, email, passwordHash, prunUsername, companyCode, inviteCode),
+      `INSERT INTO users (id, email, password_hash, prun_username, company_code, display_name, invite_code_id)
+       VALUES (?, ?, ?, ?, ?, ?, (SELECT id FROM invite_codes WHERE code = ?))`,
+    ).bind(userId, email, passwordHash, prunUsername, companyCode, prunUsername, inviteCode),
 
-    // 3. 审计日志
+    // 3. 从 extension_users 移除同 (prun_username, company_code) 的上报记录，
+    //    避免 listAllUsers LEFT JOIN 时把已注册用户当成 NON_ORG 展示。
+    env.DB.prepare(
+      `DELETE FROM extension_users WHERE prun_username = ? AND company_code = ?`,
+    ).bind(prunUsername, companyCode),
+
+    // 4. 审计日志
     env.DB.prepare(
       `INSERT INTO audit_logs (id, actor_type, actor_id, action, target_type, target_id)
        VALUES (?, 'user', ?, 'user.register', 'user', ?)`,

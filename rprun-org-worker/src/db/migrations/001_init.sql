@@ -7,7 +7,10 @@ CREATE TABLE IF NOT EXISTS users (
   password_hash   TEXT NOT NULL,
   prun_username   TEXT NOT NULL,
   company_code    TEXT NOT NULL,
-  display_name    TEXT NOT NULL DEFAULT prun_username,
+  -- display_name 不设默认：SQLite/D1 不支持 DEFAULT 列引用，
+  -- 历史曾用 `DEFAULT prun_username` 被解释为字符串字面量导致脏数据。
+  -- 由 registerWithInvite 在 INSERT 时显式 bind prun_username。
+  display_name    TEXT NOT NULL,
   role            TEXT NOT NULL DEFAULT 'COLLABORATOR'
                   CHECK (role IN ('BOARD','COLLABORATOR')),
   invite_code_id  TEXT NOT NULL UNIQUE,
