@@ -23,7 +23,7 @@ import { writeAuditLog } from '../db/repositories/audit-logs.repo';
 
 const TASK_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
   PUBLISHED: ['AWAITING_CONTRACT', 'CANCELLED'],
-  AWAITING_CONTRACT: ['IN_PROGRESS', 'PUBLISHED', 'CANCELLED'],
+  AWAITING_CONTRACT: ['IN_PROGRESS', 'COMPLETED', 'PUBLISHED', 'CANCELLED'],
   IN_PROGRESS: ['COMPLETED', 'CANCELLED'],
   COMPLETED: [],
   CANCELLED: [],
