@@ -136,33 +136,50 @@ export interface CreateTaskInput {
   expiresAt?: string;
 }
 
-export async function createTask(db: D1Database, input: CreateTaskInput): Promise<OrgTask> {
-  const id = generateId();
+// 批量创建任务：用 db.batch 在同一次调用里插入多条，原子提交。
+// 用于"多物品任务拆解为单物品子任务"——一次发布多物品会展开为 N 条独立任务。
+// 每条都是单物品，partial claim 逻辑可以正常套用。
+// 返回的顺序与 inputs 一致（按 inputs 顺序排列）。
+export async function createTasks(
+  db: D1Database,
+  inputs: CreateTaskInput[],
+): Promise<OrgTask[]> {
+  if (inputs.length === 0) return [];
   const now = new Date().toISOString();
-  await db
-    .prepare(
-      `INSERT INTO tasks (
-         id, type, contract_json, status,
-         publisher_id, publisher_username, publisher_company_code,
-         expires_at, created_at, published_at, updated_at
-       ) VALUES (?, ?, ?, 'PUBLISHED', ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .bind(
-      id,
-      input.type,
-      JSON.stringify(input.contractJson),
-      input.publisherId,
-      input.publisherUsername,
-      input.publisherCompanyCode,
-      input.expiresAt ?? null,
-      now,
-      now,
-      now,
-    )
-    .run();
-  const task = await findTaskById(db, id);
-  if (!task) throw new Error('Task creation failed: row not found after insert');
-  return task;
+  // 在内存里同时持有 id（generateId 是同步生成），batch 后用 id 精确回查。
+  const ids: string[] = inputs.map(() => generateId());
+  const statements = inputs.map((input, i) =>
+    db
+      .prepare(
+        `INSERT INTO tasks (
+           id, type, contract_json, status,
+           publisher_id, publisher_username, publisher_company_code,
+           expires_at, created_at, published_at, updated_at
+         ) VALUES (?, ?, ?, 'PUBLISHED', ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        ids[i],
+        input.type,
+        JSON.stringify(input.contractJson),
+        input.publisherId,
+        input.publisherUsername,
+        input.publisherCompanyCode,
+        input.expiresAt ?? null,
+        now,
+        now,
+        now,
+      ),
+  );
+  await db.batch(statements);
+
+  // 按 id 精确回查，保留顺序
+  const results: OrgTask[] = [];
+  for (const id of ids) {
+    const row = await findTaskRowById(db, id);
+    if (!row) throw new Error(`Task creation failed: id ${id} not found after insert`);
+    results.push(mapTask(row));
+  }
+  return results;
 }
 
 export async function updateTaskContractJson(

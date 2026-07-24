@@ -7,7 +7,7 @@ import { badRequest, forbidden, notFound, HttpError } from '../utils/http-error'
 import { mapTask } from '../db/mappers';
 import {
   claimTask as repoClaimTask,
-  createTask as repoCreateTask,
+  createTasks as repoCreateTasks,
   deleteTask as repoDeleteTask,
   findTaskRowById,
   linkContract as repoLinkContract,
@@ -39,6 +39,11 @@ export interface CreateTaskParams {
   expiresAt?: string;
 }
 
+// 多物品任务拆解：
+//   发布任务时如果 contractJson.items 包含多个物品，每个物品会被拆成独立的单物品任务。
+//   这样 partial claim 逻辑可以正常套用（每个任务只有 1 个 item.amount）。
+//   拆解后所有子任务共享 currency / location / template / publisher / expiresAt 等元数据。
+//   返回值是拆解后的第一条任务（前端可用它 navigate，但 MarketView 拉列表会看到全部）。
 export async function createTask(
   env: Env,
   userId: string,
@@ -46,24 +51,45 @@ export async function createTask(
   companyCode: string,
   params: CreateTaskParams,
 ): Promise<OrgTask> {
-  const input: CreateTaskInput = {
+  const baseInput = {
     type: params.type,
-    contractJson: params.contractJson,
     publisherId: userId,
     publisherUsername: prunUsername,
     publisherCompanyCode: companyCode,
     expiresAt: params.expiresAt,
   };
-  const task = await repoCreateTask(env.DB, input);
-  await writeAuditLog(env.DB, {
-    actorType: 'user',
-    actorId: userId,
-    action: 'task.create',
-    targetType: 'task',
-    targetId: task.id,
-    metadata: { type: task.type, status: task.status },
-  });
-  return task;
+
+  // 把 items 拆成多条 CreateTaskInput；非 items 字段保持不变。
+  const inputs: CreateTaskInput[] = params.contractJson.items.map(item => ({
+    ...baseInput,
+    contractJson: {
+      ...params.contractJson,
+      items: [item],
+    },
+  }));
+
+  // 单一物品的常见情况：用单条 INSERT 路径避免 batch 开销——但 batch 也只是
+  // 一次网络往返，性能差异不大。统一走批量接口保持逻辑简单。
+  const tasks = await repoCreateTasks(env.DB, inputs);
+
+  // 每条任务都写一条 audit log，便于排查"这次发布对应几条挂单"。
+  for (const task of tasks) {
+    await writeAuditLog(env.DB, {
+      actorType: 'user',
+      actorId: userId,
+      action: 'task.create',
+      targetType: 'task',
+      targetId: task.id,
+      metadata: {
+        type: task.type,
+        status: task.status,
+        split_from_multi_item: tasks.length > 1,
+        split_total: tasks.length,
+      },
+    });
+  }
+  // 返回第一条，前端可用来 navigate / 展示 toast
+  return tasks[0];
 }
 
 export async function patchTask(
