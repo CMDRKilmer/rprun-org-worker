@@ -95,6 +95,13 @@ function taskJsonToFingerprint(json: TaskContractJson): ContractFingerprint {
   return fp;
 }
 
+// 从 items 计算总价（sum of price × amount）
+function totalPriceFromItems(items: { commodity: string; amount: number; price?: number }[]): number | undefined {
+  const priced = items.filter(i => i.price !== undefined && i.price > 0);
+  if (priced.length === 0) return undefined;
+  return priced.reduce((sum, i) => sum + i.price! * i.amount, 0);
+}
+
 // 权威比对：以 task.contractJson 为 source of truth，
 // 应用反转后与前端上报的 fingerprint 严格匹配。
 export function matchContractFingerprint(
@@ -120,10 +127,15 @@ export function matchContractFingerprint(
   if (!itemsEqual(task.items, fingerprint.items)) {
     return { matched: false, reason: 'items mismatch' };
   }
-  if (!priceEquals(task.price, fingerprint.price)) {
+  // 顶层 price 比对：BUY/SELL 任务价格在 item 级别，task.contractJson.price
+  // 可能是 undefined；合同侧 fingerprint.price 来自 PAYMENT 总金额。
+  // 当一方缺失时，从各自 items 反算总价使两侧可比。
+  const taskPrice = task.price ?? totalPriceFromItems(task.items);
+  const fpPrice = fingerprint.price ?? totalPriceFromItems(fingerprint.items);
+  if (!priceEquals(taskPrice, fpPrice)) {
     return {
       matched: false,
-      reason: `price mismatch: task=${task.price} fingerprint=${fingerprint.price}`,
+      reason: `price mismatch: task=${taskPrice} fingerprint=${fpPrice}`,
     };
   }
   const locA = task.location ?? '';
