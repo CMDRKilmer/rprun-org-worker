@@ -65,11 +65,27 @@ export async function matchContract(
   const taskJson = JSON.parse(row.contract_json) as Parameters<
     typeof matchContractFingerprint
   >[0];
-  const result: MatchResult = matchContractFingerprint(
+
+  // 发布者发送的合同不反转：优先用 publisher 匹配（no inversion），
+  // 失败再尝试 claimer（inversion）。不依赖存储的 contract_creator。
+  let result: MatchResult = matchContractFingerprint(
     taskJson,
-    row.contract_creator ?? undefined,
+    'publisher',
     params.fingerprint,
   );
+  let effectiveCreator: ContractCreator = 'publisher';
+
+  if (!result.matched) {
+    const fallbackResult = matchContractFingerprint(
+      taskJson,
+      'claimer',
+      params.fingerprint,
+    );
+    if (fallbackResult.matched) {
+      result = fallbackResult;
+      effectiveCreator = 'claimer';
+    }
+  }
 
   if (!result.matched) {
     await writeAuditLog(env.DB, {
@@ -94,7 +110,7 @@ export async function matchContract(
       taskId,
       userId,
       params.contractId,
-      row.contract_creator ?? 'claimer',
+      effectiveCreator,
     );
     await writeAuditLog(env.DB, {
       actorType: 'user',
