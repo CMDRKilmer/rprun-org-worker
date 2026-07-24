@@ -56,6 +56,13 @@ export const cancelTaskSchema = z.object({
   reason: z.string().max(512).optional(),
 });
 
+// POST /tasks/:id/claim 可选 body：amount 用于裁剪接取量。
+// 不传或传 null 时接取全部（与旧行为一致）；传 amount 时必须为正整数。
+// 业务校验（amount ≤ 各 item.amount）由 task-service.claimTask 在 SQL 之前完成。
+export const claimTaskSchema = z.object({
+  amount: z.number().int().positive().nullable().optional(),
+});
+
 export const linkContractSchema = z.object({
   contractId: z.string().min(1).max(64),
   contractCreator: z.enum(['publisher', 'claimer']),

@@ -8,6 +8,7 @@ import {
   createTaskSchema,
   patchTaskSchema,
   cancelTaskSchema,
+  claimTaskSchema,
   linkContractSchema,
   matchContractSchema,
   syncStatusSchema,
@@ -82,21 +83,38 @@ tasks.patch('/:id', async (c) => {
 });
 
 // POST /tasks/:id/claim
+// 可选 body: { amount?: number }。当 amount 传入时表示"裁剪接取量"：
+//   - amount < 原任务任一 item.amount → partial claim：
+//     原任务 amount 缩到剩余并保持 PUBLISHED 在市场上；
+//     同时创建一个反向子任务（AWAITING_CONTRACT）给接取者；
+//     返回 { task: parent, childTask: child }。
+//   - amount = 原任务所有 item.amount 或不传 → 完整接取：
+//     原任务 → AWAITING_CONTRACT（旧行为），返回 { task: task }。
 tasks.post('/:id/claim', async (c) => {
-  const task = await claimTask(
+  // body 可缺省（旧调用）；缺省时 schema 走默认值 → undefined
+  const rawBody = await c.req.json().catch(() => ({}));
+  const parsed = claimTaskSchema.safeParse(rawBody);
+  if (!parsed.success) {
+    throw apiError('VALIDATION_ERROR', parsed.error.issues[0].message, 400);
+  }
+  const result = await claimTask(
     c.env,
     c.req.param('id'),
     c.var.userId,
     c.var.prunUsername,
     c.var.companyCode,
+    parsed.data.amount,
   );
-  return c.json(task, 200 as ContentfulStatusCode);
+  return c.json(result, 200 as ContentfulStatusCode);
 });
 
 // POST /tasks/:id/release
+// 释放路径：
+//   - 完整接取任务：AWAITING_CONTRACT → PUBLISHED（旧行为）
+//   - 部分接取的子任务（parent_task_id 非空）：删除子任务 + 加回 amount 到原任务
 tasks.post('/:id/release', async (c) => {
-  const task = await releaseTask(c.env, c.req.param('id'), c.var.userId);
-  return c.json(task, 200 as ContentfulStatusCode);
+  const result = await releaseTask(c.env, c.req.param('id'), c.var.userId);
+  return c.json(result, 200 as ContentfulStatusCode);
 });
 
 // POST /tasks/:id/cancel

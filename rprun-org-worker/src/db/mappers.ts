@@ -30,6 +30,9 @@ export interface TaskRow {
   claimer_company_code: string | null;
   contract_id: string | null;
   contract_creator: 'publisher' | 'claimer' | null;
+  // 部分接取：子任务用 parent_task_id 指回原任务。
+  // 原任务的 parent_task_id 始终为 NULL（没有上级）。
+  parent_task_id: string | null;
   expires_at: string | null;
   created_at: string;
   published_at: string | null;
@@ -97,6 +100,7 @@ export function mapTask(row: TaskRow): OrgTask {
     claimerCompanyCode: row.claimer_company_code ?? undefined,
     contractId: row.contract_id ?? undefined,
     contractCreator: row.contract_creator ?? undefined,
+    parentTaskId: row.parent_task_id ?? undefined,
     expiresAt: row.expires_at ?? undefined,
     createdAt: row.created_at,
     publishedAt: row.published_at ?? undefined,

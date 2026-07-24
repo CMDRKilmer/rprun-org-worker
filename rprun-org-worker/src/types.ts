@@ -52,6 +52,9 @@ export interface OrgTask {
   claimerCompanyCode?: string;
   contractId?: string;
   contractCreator?: ContractCreator;
+  // 部分接取（partial claim）：子任务的 parentTaskId 指回原任务。
+  // 原任务的 parentTaskId 始终为 undefined。
+  parentTaskId?: string;
   expiresAt?: string;
   createdAt: string;
   publishedAt?: string;
