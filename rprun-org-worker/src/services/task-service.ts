@@ -44,6 +44,11 @@ export interface CreateTaskParams {
 //   这样 partial claim 逻辑可以正常套用（每个任务只有 1 个 item.amount）。
 //   拆解后所有子任务共享 currency / location / template / publisher / expiresAt 等元数据。
 //   返回值是拆解后的第一条任务（前端可用它 navigate，但 MarketView 拉列表会看到全部）。
+//
+//   例外：transport 任务（SHIP / LOAN）的 items 表示多段路线 / 多地点，并非独立商品；
+//   partial claim 也不适用于 transport（合同语义不一样）。这些任务保持多物品原样。
+const TRANSPORT_TYPES = new Set<TaskType>(['SHIP', 'LOAN']);
+
 export async function createTask(
   env: Env,
   userId: string,
@@ -58,6 +63,22 @@ export async function createTask(
     publisherCompanyCode: companyCode,
     expiresAt: params.expiresAt,
   };
+
+  if (TRANSPORT_TYPES.has(params.type)) {
+    // transport 任务：保留多 items 原样写入单条任务
+    const task = await repoCreateTasks(env.DB, [
+      { ...baseInput, contractJson: params.contractJson },
+    ]).then(tasks => tasks[0]);
+    await writeAuditLog(env.DB, {
+      actorType: 'user',
+      actorId: userId,
+      action: 'task.create',
+      targetType: 'task',
+      targetId: task.id,
+      metadata: { type: task.type, status: task.status, transport_multi_item_preserved: true },
+    });
+    return task;
+  }
 
   // 把 items 拆成多条 CreateTaskInput；非 items 字段保持不变。
   const inputs: CreateTaskInput[] = params.contractJson.items.map(item => ({

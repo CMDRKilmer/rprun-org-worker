@@ -11,9 +11,12 @@
 -- 提供 0..7 的 idx 序列。
 
 -- Step 1: 给旧任务写 _decomposed_into 占位
+-- 注意：排除 SHIP / LOAN（transport 任务），它们的 items 表示多段路线/多地点，
+-- 不能按商品拆解。
 UPDATE tasks
 SET contract_json = json_set(contract_json, '$._decomposed_into', json_array())
 WHERE status = 'PUBLISHED'
+  AND type NOT IN ('SHIP', 'LOAN')
   AND json_array_length(contract_json, '$.items') > 1;
 
 -- Step 2: 展开并插入新任务
@@ -45,6 +48,7 @@ SELECT
   CURRENT_TIMESTAMP
 FROM tasks t, a, b
 WHERE t.status = 'PUBLISHED'
+  AND t.type NOT IN ('SHIP', 'LOAN')
   AND json_array_length(t.contract_json, '$.items') > 1
   AND (a.n * 2 + b.n) < json_array_length(t.contract_json, '$.items');
 
@@ -63,6 +67,7 @@ SET contract_json = json_set(
   )
 )
 WHERE status = 'PUBLISHED'
+  AND type NOT IN ('SHIP', 'LOAN')
   AND json_array_length(contract_json, '$.items') > 1;
 
 -- Step 4: 旧任务置 CANCELLED
@@ -72,6 +77,7 @@ SET
   cancelled_at = CURRENT_TIMESTAMP,
   updated_at = CURRENT_TIMESTAMP
 WHERE status = 'PUBLISHED'
+  AND type NOT IN ('SHIP', 'LOAN')
   AND json_array_length(contract_json, '$.items') > 1;
 
 -- Step 5: 验证
