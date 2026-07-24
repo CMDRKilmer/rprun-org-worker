@@ -309,10 +309,9 @@ export async function partialClaimTask(
   //   contract_creator = reverseContractCreator（决定谁去 PrUn 签反向合同）
   //   parent_task_id = 原任务 ID
   // 反向合同约定：
-  //   父 BUY：发布者想买入 → 接取者卖给他 → contract_creator = 'publisher'
-  //     （子任务 publisher 是接取者，他作为 publisher 创建反向合同）
-  //   父 SELL：发布者想卖出 → 接取者从他买 → contract_creator = 'claimer'
-  //     （子任务 claimer 是原发布者，他作为 claimer 创建反向合同）
+  //   子任务的 contract_json.template 已经是反向（父 BUY→子 SELL / 父 SELL→子 BUY）。
+  //   effectiveTemplate 处理时不希望再反转 → contract_creator = 'publisher'。
+  //   子任务 publisher = 接取者，由他在 PrUn 提交反向合同 offer。
   await db
     .prepare(
       `INSERT INTO tasks (

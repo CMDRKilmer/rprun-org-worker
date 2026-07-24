@@ -260,12 +260,11 @@ export async function claimTask(
   // 部分接取路径：原任务缩 amount 后保持 PUBLISHED，给接取者创建反向子任务。
   if (normalizedAmount !== undefined && normalizedAmount < minItemAmount(parentContract)) {
     // 反向合同创建方：
-    //   父 BUY：发布者想买入 → 接取者卖给他 → 子任务 publisher（= 接取者）签反向合同
-    //     即 contract_creator = 'publisher'
-    //   父 SELL：发布者想卖出 → 接取者从他买 → 子任务 publisher（= 接取者）
-    //     等待原发布者签反向合同 → contract_creator = 'claimer'
-    const reverseContractCreator: ContractCreator =
-      row.type === 'BUY' ? 'publisher' : 'claimer';
+    //   子任务的 contract_json.template 已经是反向（父 BUY→子 SELL / 父 SELL→子 BUY）。
+    //   effectiveTemplate 子任务模板时不应再反转 → contract_creator = 'publisher'。
+    //   子任务 publisher = 接取者，由他在 PrUn 提交反向合同 offer。
+    //   （claimer 在子任务里是 NULL，没有"接取者创建合同"的概念。）
+    const reverseContractCreator: ContractCreator = 'publisher';
 
     const result = await repoPartialClaimTask(env.DB, {
       parentTaskId: taskId,

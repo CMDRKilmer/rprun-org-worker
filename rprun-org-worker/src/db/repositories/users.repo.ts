@@ -5,6 +5,9 @@ import type { OrgUser, RegisteredUserRole } from '../../types';
 
 export interface ExtendedOrgUser extends Omit<OrgUser, 'role'> {
   role: RegisteredUserRole | 'NON_ORG';
+  // 最后活跃时间：注册用户用 last_login_at，未注册用 extension_users.last_seen_at。
+  // 前端用此字段展示「最后活跃」，比 createdAt 更有用。
+  lastSeenAt: string;
 }
 
 export async function findUserById(db: D1Database, id: string): Promise<OrgUser | null> {
@@ -31,11 +34,11 @@ export async function listAllUsers(db: D1Database): Promise<ExtendedOrgUser[]> {
       WHERE u.id IS NULL
       ORDER BY eu.reported_at ASC
     `)
-    .all<{ id: string; prun_username: string; company_code: string; display_name: string; reported_at: string }>();
+    .all<{ id: string; prun_username: string; company_code: string; display_name: string; reported_at: string; last_seen_at: string }>();
 
   const allUsers: ExtendedOrgUser[] = [];
   for (const orgUser of orgUserMap.values()) {
-    allUsers.push(orgUser);
+    allUsers.push({ ...orgUser, lastSeenAt: orgUser.lastLoginAt ?? orgUser.createdAt });
   }
   for (const ext of extUsers.results ?? []) {
     allUsers.push({
@@ -46,6 +49,7 @@ export async function listAllUsers(db: D1Database): Promise<ExtendedOrgUser[]> {
       displayName: ext.display_name,
       role: 'NON_ORG',
       createdAt: ext.reported_at,
+      lastSeenAt: (ext as { last_seen_at?: string }).last_seen_at ?? ext.reported_at,
     });
   }
   return allUsers.sort((a, b) => {
