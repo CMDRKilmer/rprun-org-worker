@@ -369,6 +369,16 @@ export async function cancelTask(
   if (!isPublisher && !isBoard) {
     throw forbidden('NOT_AUTHORIZED_TO_CANCEL');
   }
+  // partial claim 自动创建的反向子任务不允许取消：
+  // 取消子任务会绕过 releasePartialClaimTask 中"加回父任务 amount"的逻辑，
+  // 导致父任务 amount 永久丢失。子任务只能用 release 还原回父任务。
+  // BOARD 也不允许代删子任务（与 deleteTaskForPublisher 同样的 owner-only 语义）。
+  if (row.parent_task_id) {
+    throw badRequest(
+      'CANNOT_CANCEL_CHILD_TASK',
+      'Child task of partial claim cannot be cancelled; use release instead',
+    );
+  }
   if (isBoard && !isPublisher && !reason) {
     throw badRequest('REASON_REQUIRED_FOR_BOARD_CANCEL', 'Reason required for board cancel');
   }
@@ -458,6 +468,18 @@ export async function deleteTaskForPublisher(
   if (!row) throw notFound('Task not found');
   if (row.publisher_id !== userId) {
     throw forbidden('NOT_PUBLISHER');
+  }
+  // partial claim 自动创建的反向子任务不允许删除。
+  // 子任务的生命周期只有两种结局：
+  //   1. 释放（releasePartialClaimTask）：删除子任务 + 加回父任务 amount
+  //   2. 走完合同（IN_PROGRESS / COMPLETED / CANCELLED 由父任务状态联动）
+  // 删除子任务会绕过"加回 amount"的逻辑，导致父任务 amount 永久丢失，
+  // 因此服务端必须拒绝直接 delete。
+  if (row.parent_task_id) {
+    throw badRequest(
+      'CANNOT_DELETE_CHILD_TASK',
+      'Child task of partial claim cannot be deleted; use release instead',
+    );
   }
   // 先写审计（删除事件本身），再删主表。即使主表 DELETE 失败，审计记录在，
   // 便于后续运营/排障。

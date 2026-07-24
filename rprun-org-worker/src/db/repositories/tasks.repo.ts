@@ -68,6 +68,10 @@ export async function listTasks(
   } else if (filter.scope === 'published') {
     where.push('publisher_id = ?');
     binds.push(filter.userId);
+    // 排除 partial claim 自动创建的反向子任务（parent_task_id 非空）。
+    // 这些子任务虽然 publisher_id 是当前用户，但语义是"反向合同载体"而非
+    // "我发布的任务"——它们应该出现在「我的接取」里而不是「我的发布」里。
+    where.push('parent_task_id IS NULL');
     if (filter.type) {
       where.push('type = ?');
       binds.push(filter.type);
@@ -77,9 +81,13 @@ export async function listTasks(
       binds.push(filter.claimerUsername);
     }
   } else {
-    // claimed：按当前用户过滤
-    where.push('claimer_id = ?');
-    binds.push(filter.userId);
+    // claimed：「我的接取」— 同时匹配两种身份：
+    //   1. 我是完整接取任务的 claimer（claimer_id = userId）
+    //   2. 我是 partial claim 自动创建的反向子任务的 publisher
+    //      （这些子任务的 claimer_id 是 NULL，publisher_id 才是接取者）
+    // 这样玩家既能看见"我接取的单子"，也能看见"我裁剪接取后系统为我生成的反向单"。
+    where.push('(claimer_id = ? OR (publisher_id = ? AND parent_task_id IS NOT NULL))');
+    binds.push(filter.userId, filter.userId);
   }
 
   if (filter.since) {
