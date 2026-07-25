@@ -515,13 +515,9 @@ export async function deleteTaskForPublisher(
   if (row.publisher_id !== userId) {
     throw forbidden('NOT_PUBLISHER');
   }
-  // partial claim 自动创建的反向子任务不允许删除。
-  // 子任务的生命周期只有两种结局：
-  //   1. 释放（releasePartialClaimTask）：删除子任务 + 加回父任务 amount
-  //   2. 走完合同（IN_PROGRESS / COMPLETED / CANCELLED 由父任务状态联动）
-  // 删除子任务会绕过"加回 amount"的逻辑，导致父任务 amount 永久丢失，
-  // 因此服务端必须拒绝直接 delete。
-  if (row.parent_task_id) {
+  // partial claim 自动创建的反向子任务：进行中的不允许直接删除（须走 release），
+  // 但已完成状态（COMPLETED / CANCELLED）的子任务允许物理删除。
+  if (row.parent_task_id && row.status !== 'COMPLETED' && row.status !== 'CANCELLED') {
     throw badRequest(
       'CANNOT_DELETE_CHILD_TASK',
       'Child task of partial claim cannot be deleted; use release instead',

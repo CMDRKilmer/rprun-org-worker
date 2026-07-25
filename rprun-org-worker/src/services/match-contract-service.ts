@@ -9,7 +9,7 @@
 //      调 linkContract 把合同写入任务；否则只返回比对结果由前端走原端点。
 
 import type { Env } from '../config';
-import type { OrgTask } from '../types';
+import type { OrgTask, ContractCreator } from '../types';
 import { badRequest, forbidden, notFound } from '../utils/http-error';
 import { findTaskRowById } from '../db/repositories/tasks.repo';
 import { writeAuditLog } from '../db/repositories/audit-logs.repo';
