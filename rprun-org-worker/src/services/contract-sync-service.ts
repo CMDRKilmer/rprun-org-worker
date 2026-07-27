@@ -3,7 +3,11 @@ import type { Env } from '../config';
 import type { OrgTask, PrunContractStatus, TaskStatus } from '../types';
 import { badRequest, forbidden, notFound, HttpError } from '../utils/http-error';
 import { canTransition } from './task-service';
-import { findTaskRowById, setTaskStatus } from '../db/repositories/tasks.repo';
+import {
+  findTaskRowById,
+  findEffectivePublisherId,
+  setTaskStatus,
+} from '../db/repositories/tasks.repo';
 import { writeAuditLog } from '../db/repositories/audit-logs.repo';
 import { mapTask } from '../db/mappers';
 

@@ -66,12 +66,14 @@ export async function listTasks(
       binds.push(`%"location":"${filter.location}"%`);
     }
   } else if (filter.scope === 'published') {
-    where.push('publisher_id = ?');
-    binds.push(filter.userId);
-    // 排除 partial claim 自动创建的反向子任务（parent_task_id 非空）。
-    // 这些子任务虽然 publisher_id 是当前用户，但语义是"反向合同载体"而非
-    // "我发布的任务"——它们应该出现在「我的接取」里而不是「我的发布」里。
-    where.push('parent_task_id IS NULL');
+    // 「我的发布」：同时包含
+    //   1. 我是顶级任务 publisher（parent_task_id IS NULL 且 publisher_id = me）
+    //   2. 我是某子任务父任务的 publisher（parent_task_id 指向我发布的任务）——
+    //      partial claim 产生的反向子任务也需要让我看到，方便跟踪合同/状态变更。
+    where.push(
+      '(publisher_id = ? OR parent_task_id IN (SELECT id FROM tasks WHERE publisher_id = ?))',
+    );
+    binds.push(filter.userId, filter.userId);
     if (filter.type) {
       where.push('type = ?');
       binds.push(filter.type);
@@ -125,6 +127,29 @@ export async function findTaskById(db: D1Database, id: string): Promise<OrgTask 
 
 export async function findTaskRowById(db: D1Database, id: string): Promise<TaskRow | null> {
   return db.prepare('SELECT * FROM tasks WHERE id = ?').bind(id).first<TaskRow>();
+}
+
+// 查询任务的"有效发布者 id"：
+//   - 顶级任务：自身的 publisher_id
+//   - 子任务（partial claim 反向）：父任务的 publisher_id（即原始发布者）
+// 返回 null 表示任务不存在。
+export async function findEffectivePublisherId(
+  db: D1Database,
+  taskId: string,
+): Promise<string | null> {
+  const row = await db
+    .prepare('SELECT publisher_id, parent_task_id FROM tasks WHERE id = ?')
+    .bind(taskId)
+    .first<{ publisher_id: string; parent_task_id: string | null }>();
+  if (!row) return null;
+  if (row.parent_task_id) {
+    const parent = await db
+      .prepare('SELECT publisher_id FROM tasks WHERE id = ?')
+      .bind(row.parent_task_id)
+      .first<{ publisher_id: string }>();
+    return parent?.publisher_id ?? null;
+  }
+  return row.publisher_id;
 }
 
 export interface CreateTaskInput {

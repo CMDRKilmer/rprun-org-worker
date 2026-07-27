@@ -10,6 +10,7 @@ import {
   createTasks as repoCreateTasks,
   deleteTask as repoDeleteTask,
   findTaskRowById,
+  findEffectivePublisherId,
   linkContract as repoLinkContract,
   partialClaimTask as repoPartialClaimTask,
   releasePartialClaimTask as repoReleasePartialClaimTask,
@@ -479,7 +480,10 @@ export async function linkContract(
 ): Promise<OrgTask> {
   const row = await findTaskRowById(env.DB, taskId);
   if (!row) throw notFound('Task not found');
-  if (row.publisher_id !== userId && row.claimer_id !== userId) {
+  const effectivePublisherId = row.parent_task_id
+    ? await findEffectivePublisherId(env.DB, taskId)
+    : row.publisher_id;
+  if (effectivePublisherId !== userId && row.claimer_id !== userId) {
     throw forbidden('NOT_TASK_PARTY');
   }
   if (row.status !== 'AWAITING_CONTRACT') {
@@ -555,9 +559,13 @@ export async function getTaskForUser(
 ): Promise<OrgTask> {
   const row = await findTaskRowById(env.DB, taskId);
   if (!row) throw notFound('Task not found');
+  // 子任务的 publisher_id 是接取者，需通过父任务追溯到"原始发布者"。
+  const effectivePublisherId = row.parent_task_id
+    ? await findEffectivePublisherId(env.DB, taskId)
+    : row.publisher_id;
   if (
     row.status !== 'PUBLISHED' &&
-    row.publisher_id !== userId &&
+    effectivePublisherId !== userId &&
     row.claimer_id !== userId
   ) {
     throw forbidden('NOT_TASK_PARTY');
