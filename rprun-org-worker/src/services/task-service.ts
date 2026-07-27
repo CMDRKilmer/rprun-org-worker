@@ -7,18 +7,14 @@ import { badRequest, forbidden, notFound, HttpError } from '../utils/http-error'
 import { mapTask } from '../db/mappers';
 import {
   claimTask as repoClaimTask,
-  createTasks as repoCreateTasks,
+  createTask as repoCreateTask,
   deleteTask as repoDeleteTask,
   findTaskRowById,
-  findEffectivePublisherId,
   linkContract as repoLinkContract,
-  partialClaimTask as repoPartialClaimTask,
-  releasePartialClaimTask as repoReleasePartialClaimTask,
   releaseTask as repoReleaseTask,
   republishTask as repoRepublishTask,
   setTaskStatus,
   updateTaskContractJson,
-  type CreateTaskInput,
 } from '../db/repositories/tasks.repo';
 import { writeAuditLog } from '../db/repositories/audit-logs.repo';
 
@@ -40,16 +36,9 @@ export interface CreateTaskParams {
   expiresAt?: string;
 }
 
-// 多物品任务拆解：
-//   发布任务时如果 contractJson.items 包含多个物品，每个物品会被拆成独立的单物品任务。
-//   这样 partial claim 逻辑可以正常套用（每个任务只有 1 个 item.amount）。
-//   拆解后所有子任务共享 currency / location / template / publisher / expiresAt 等元数据。
-//   返回值是拆解后的第一条任务（前端可用它 navigate，但 MarketView 拉列表会看到全部）。
-//
-//   例外：transport 任务（SHIP / LOAN）的 items 表示多段路线 / 多地点，并非独立商品；
-//   partial claim 也不适用于 transport（合同语义不一样）。这些任务保持多物品原样。
-const TRANSPORT_TYPES = new Set<TaskType>(['SHIP', 'LOAN']);
-
+// 阶段 2：多物品任务不再拆解，contractJson 限制单 item。
+//   挂单路径已迁移到 listings；老 tasks 端点保留仅用于"老 partial claim 子任务"的合同关联。
+//   validation 层（createTaskSchema）保证 items.length === 1。
 export async function createTask(
   env: Env,
   userId: string,
@@ -57,61 +46,31 @@ export async function createTask(
   companyCode: string,
   params: CreateTaskParams,
 ): Promise<OrgTask> {
-  const baseInput = {
+  if (params.contractJson.items.length !== 1) {
+    throw badRequest(
+      'MULTI_ITEM_NOT_SUPPORTED',
+      'Single item required; use POST /listings for market listings',
+    );
+  }
+
+  const task = await repoCreateTask(env.DB, {
     type: params.type,
+    contractJson: params.contractJson,
     publisherId: userId,
     publisherUsername: prunUsername,
     publisherCompanyCode: companyCode,
     expiresAt: params.expiresAt,
-  };
+  });
 
-  if (TRANSPORT_TYPES.has(params.type)) {
-    // transport 任务：保留多 items 原样写入单条任务
-    const task = await repoCreateTasks(env.DB, [
-      { ...baseInput, contractJson: params.contractJson },
-    ]).then(tasks => tasks[0]);
-    await writeAuditLog(env.DB, {
-      actorType: 'user',
-      actorId: userId,
-      action: 'task.create',
-      targetType: 'task',
-      targetId: task.id,
-      metadata: { type: task.type, status: task.status, transport_multi_item_preserved: true },
-    });
-    return task;
-  }
-
-  // 把 items 拆成多条 CreateTaskInput；非 items 字段保持不变。
-  const inputs: CreateTaskInput[] = params.contractJson.items.map(item => ({
-    ...baseInput,
-    contractJson: {
-      ...params.contractJson,
-      items: [item],
-    },
-  }));
-
-  // 单一物品的常见情况：用单条 INSERT 路径避免 batch 开销——但 batch 也只是
-  // 一次网络往返，性能差异不大。统一走批量接口保持逻辑简单。
-  const tasks = await repoCreateTasks(env.DB, inputs);
-
-  // 每条任务都写一条 audit log，便于排查"这次发布对应几条挂单"。
-  for (const task of tasks) {
-    await writeAuditLog(env.DB, {
-      actorType: 'user',
-      actorId: userId,
-      action: 'task.create',
-      targetType: 'task',
-      targetId: task.id,
-      metadata: {
-        type: task.type,
-        status: task.status,
-        split_from_multi_item: tasks.length > 1,
-        split_total: tasks.length,
-      },
-    });
-  }
-  // 返回第一条，前端可用来 navigate / 展示 toast
-  return tasks[0];
+  await writeAuditLog(env.DB, {
+    actorType: 'user',
+    actorId: userId,
+    action: 'task.create',
+    targetType: 'task',
+    targetId: task.id,
+    metadata: { type: task.type, status: task.status },
+  });
+  return task;
 }
 
 export async function patchTask(
@@ -197,9 +156,6 @@ export async function listTasksForUser(
 
 export interface ClaimTaskResult {
   task: OrgTask;
-  // 部分接取时，原任务保留 PUBLISHED 同时返回一个反向子任务（AWAITING_CONTRACT）。
-  // 完整接取时 childTask 为 undefined。
-  childTask?: OrgTask;
 }
 
 export async function claimTask(
@@ -208,12 +164,6 @@ export async function claimTask(
   userId: string,
   prunUsername: string,
   companyCode: string,
-  // 可选：裁剪接取量。
-  // - 不传或 null：完整接取（旧行为），原任务 → AWAITING_CONTRACT
-  // - 传 N 且 N < 任一 item.amount：partial claim，原任务保留 PUBLISHED
-  //   （amount 缩到剩余），并创建一个反向子任务 AWAITING_CONTRACT 给当前接取者
-  // - 传 N 且 N 等于所有 item.amount：等价于"完整接取最后一份"
-  claimAmount?: number | null,
 ): Promise<ClaimTaskResult> {
   const row = await findTaskRowById(env.DB, taskId);
   if (!row) throw notFound('Task not found');
@@ -223,78 +173,8 @@ export async function claimTask(
   if (row.publisher_id === userId) {
     throw badRequest('CANNOT_CLAIM_OWN', 'Cannot claim your own task');
   }
-
-  // 解析 contractJson：row.contract_json 在 schema 是 TEXT，但 mappers 在读取时已经
-  // 做过 JSON.parse，所以这里 row.contract_json 是字符串（mappers 取的是 row），
-  // 重新解析一次。
-  let parentContract: TaskContractJson;
-  try {
-    parentContract = typeof row.contract_json === 'string'
-      ? (JSON.parse(row.contract_json) as TaskContractJson)
-      : (row.contract_json as TaskContractJson);
-  } catch {
-    throw new HttpError(500, 'INTERNAL_ERROR', 'Task contract_json is corrupted');
-  }
-
-  // 校验裁剪量（如提供）
-  let normalizedAmount: number | undefined;
-  if (claimAmount !== undefined && claimAmount !== null) {
-    if (!Number.isInteger(claimAmount) || claimAmount <= 0) {
-      throw badRequest('INVALID_CLAIM_AMOUNT', 'claim amount must be a positive integer');
-    }
-    if (row.type !== 'BUY' && row.type !== 'SELL') {
-      throw badRequest(
-        'PARTIAL_CLAIM_NOT_SUPPORTED',
-        `partial claim not supported for task type ${row.type}`,
-      );
-    }
-    const minItemAmount = Math.min(...parentContract.items.map(i => i.amount));
-    if (claimAmount > minItemAmount) {
-      throw badRequest(
-        'INVALID_CLAIM_AMOUNT',
-        `claim amount ${claimAmount} exceeds task item amount ${minItemAmount}`,
-      );
-    }
-    normalizedAmount = claimAmount;
-  }
-
-  // 部分接取路径：原任务缩 amount 后保持 PUBLISHED，给接取者创建反向子任务。
-  if (normalizedAmount !== undefined && normalizedAmount < minItemAmount(parentContract)) {
-    // 反向合同创建方：
-    //   子任务的 contract_json.template 已经是反向（父 BUY→子 SELL / 父 SELL→子 BUY）。
-    //   effectiveTemplate 子任务模板时不应再反转 → contract_creator = 'publisher'。
-    //   子任务 publisher = 接取者，由他在 PrUn 提交反向合同 offer。
-    //   （claimer 在子任务里是 NULL，没有"接取者创建合同"的概念。）
-    const reverseContractCreator: ContractCreator = 'publisher';
-
-    const result = await repoPartialClaimTask(env.DB, {
-      parentTaskId: taskId,
-      parentContractJson: parentContract,
-      parentType: row.type as 'BUY' | 'SELL', // 上方已校验 type ∈ BUY | SELL
-      claimAmount: normalizedAmount,
-      claimerId: userId,
-      claimerUsername: prunUsername,
-      claimerCompanyCode: companyCode,
-      reverseContractCreator,
-    });
-
-    await writeAuditLog(env.DB, {
-      actorType: 'user',
-      actorId: userId,
-      action: 'task.partial_claim',
-      targetType: 'task',
-      targetId: taskId,
-      metadata: {
-        claim_amount: normalizedAmount,
-        child_task_id: result.childCreated.id,
-        reverse_contract_creator: reverseContractCreator,
-      },
-    });
-    return { task: result.parentUpdated, childTask: result.childCreated };
-  }
-
-  // 完整接取路径（含 normalizedAmount 等于 item.amount 的边界）：
-  // 原任务 → AWAITING_CONTRACT（与旧行为一致）。
+  // 阶段 2：不再支持 partial claim（裁剪接取）；裁剪接取走 listings 端点。
+  // 完整接取：原任务 → AWAITING_CONTRACT。
   const contractCreator: ContractCreator = row.type === 'SHIP' ? 'publisher' : 'claimer';
   await repoClaimTask(env.DB, taskId, userId, prunUsername, companyCode, contractCreator);
   await writeAuditLog(env.DB, {
@@ -303,30 +183,19 @@ export async function claimTask(
     action: 'task.claim',
     targetType: 'task',
     targetId: taskId,
-    metadata: {
-      contract_creator: contractCreator,
-      claim_amount: normalizedAmount,
-    },
+    metadata: { contract_creator: contractCreator },
   });
   const updated = await findTaskRowById(env.DB, taskId);
   if (!updated) throw new HttpError(500, 'INTERNAL_ERROR', 'Task not found after claim');
   return { task: mapTask(updated) };
 }
 
-function minItemAmount(contract: TaskContractJson): number {
-  return Math.min(...contract.items.map(i => i.amount));
-}
-
-// release 返回结构：
-//   - 完整接取任务 release → 返回原任务（AWAITING_CONTRACT → PUBLISHED）
-//   - 部分接取子任务 release → 返回父任务（amount 已加回原值）
-//     前端可用 parent_task_id 关联到原任务
+// 阶段 3：release 完全简化。
+//   完整接取任务 release → AWAITING_CONTRACT → PUBLISHED。
+//   父任务指针（parent_task_id）已删，老 partial claim 孤儿任务由 008 migration
+//   兜底置 CANCELLED，这里不再做特殊处理。
 export interface ReleaseTaskResult {
   task: OrgTask;
-  // 当释放的是部分接取子任务时，标记反向合同时留下的子任务已被删除
-  parentTaskId?: string;
-  // 当释放的是部分接取子任务时，告诉前端子任务 amount 已经加回原任务
-  restoredAmount?: number;
 }
 
 export async function releaseTask(
@@ -337,51 +206,6 @@ export async function releaseTask(
   const row = await findTaskRowById(env.DB, taskId);
   if (!row) throw notFound('Task not found');
 
-  // 部分接取的子任务路径：parent_task_id 非空，由 publisher（= 接取者）释放。
-  // 子任务的 claimer_id 为 NULL（没有"接取者"概念），所以原 claimer_id 检查不适用。
-  if (row.parent_task_id) {
-    if (row.publisher_id !== userId) {
-      throw forbidden('Only the publisher (claimer of parent) can release the partial claim');
-    }
-    // 子任务状态必须为 AWAITING_CONTRACT（partial claim 总是创建这个状态）；
-    // 关联合同后变成 IN_PROGRESS / COMPLETED，则不允许 release。
-    if (row.status !== 'AWAITING_CONTRACT') {
-      throw badRequest(
-        'INVALID_TRANSITION',
-        `Cannot release partial-claim child in ${row.status} state`,
-      );
-    }
-    // 算出 child 的 amount（用于审计 + 响应）
-    let childContract: TaskContractJson;
-    try {
-      childContract = typeof row.contract_json === 'string'
-        ? (JSON.parse(row.contract_json) as TaskContractJson)
-        : (row.contract_json as TaskContractJson);
-    } catch {
-      throw new HttpError(500, 'INTERNAL_ERROR', 'Child task contract_json is corrupted');
-    }
-    const childAmount = childContract.items[0]?.amount ?? 0;
-
-    const result = await repoReleasePartialClaimTask(env.DB, taskId);
-    await writeAuditLog(env.DB, {
-      actorType: 'user',
-      actorId: userId,
-      action: 'task.release_partial_claim',
-      targetType: 'task',
-      targetId: taskId,
-      metadata: {
-        parent_task_id: row.parent_task_id,
-        restored_amount: childAmount,
-      },
-    });
-    return {
-      task: result.parentUpdated,
-      parentTaskId: row.parent_task_id,
-      restoredAmount: childAmount,
-    };
-  }
-
-  // 完整接取任务路径：AWAITING_CONTRACT → PUBLISHED，旧行为
   if (row.claimer_id !== userId) {
     throw forbidden('Only the claimer can release');
   }
@@ -416,16 +240,7 @@ export async function cancelTask(
   if (!isPublisher && !isBoard) {
     throw forbidden('NOT_AUTHORIZED_TO_CANCEL');
   }
-  // partial claim 自动创建的反向子任务不允许取消：
-  // 取消子任务会绕过 releasePartialClaimTask 中"加回父任务 amount"的逻辑，
-  // 导致父任务 amount 永久丢失。子任务只能用 release 还原回父任务。
-  // BOARD 也不允许代删子任务（与 deleteTaskForPublisher 同样的 owner-only 语义）。
-  if (row.parent_task_id) {
-    throw badRequest(
-      'CANNOT_CANCEL_CHILD_TASK',
-      'Child task of partial claim cannot be cancelled; use release instead',
-    );
-  }
+  // 阶段 2：不再处理 partial claim 子任务（已废弃）。
   if (isBoard && !isPublisher && !reason) {
     throw badRequest('REASON_REQUIRED_FOR_BOARD_CANCEL', 'Reason required for board cancel');
   }
@@ -480,10 +295,8 @@ export async function linkContract(
 ): Promise<OrgTask> {
   const row = await findTaskRowById(env.DB, taskId);
   if (!row) throw notFound('Task not found');
-  const effectivePublisherId = row.parent_task_id
-    ? await findEffectivePublisherId(env.DB, taskId)
-    : row.publisher_id;
-  if (effectivePublisherId !== userId && row.claimer_id !== userId) {
+  // 阶段 2：直接用 publisher_id 判定参与方身份（不再追溯父任务）。
+  if (row.publisher_id !== userId && row.claimer_id !== userId) {
     throw forbidden('NOT_TASK_PARTY');
   }
   if (row.status !== 'AWAITING_CONTRACT') {
@@ -519,14 +332,7 @@ export async function deleteTaskForPublisher(
   if (row.publisher_id !== userId) {
     throw forbidden('NOT_PUBLISHER');
   }
-  // partial claim 自动创建的反向子任务：进行中的不允许直接删除（须走 release），
-  // 但已完成状态（COMPLETED / CANCELLED）的子任务允许物理删除。
-  if (row.parent_task_id && row.status !== 'COMPLETED' && row.status !== 'CANCELLED') {
-    throw badRequest(
-      'CANNOT_DELETE_CHILD_TASK',
-      'Child task of partial claim cannot be deleted; use release instead',
-    );
-  }
+  // 阶段 2：不再处理 partial claim 子任务的特殊删除路径。
   // 先写审计（删除事件本身），再删主表。即使主表 DELETE 失败，审计记录在，
   // 便于后续运营/排障。
   await writeAuditLog(env.DB, {
@@ -559,13 +365,10 @@ export async function getTaskForUser(
 ): Promise<OrgTask> {
   const row = await findTaskRowById(env.DB, taskId);
   if (!row) throw notFound('Task not found');
-  // 子任务的 publisher_id 是接取者，需通过父任务追溯到"原始发布者"。
-  const effectivePublisherId = row.parent_task_id
-    ? await findEffectivePublisherId(env.DB, taskId)
-    : row.publisher_id;
+  // 阶段 2：直接用 publisher_id 判定参与方身份。
   if (
     row.status !== 'PUBLISHED' &&
-    effectivePublisherId !== userId &&
+    row.publisher_id !== userId &&
     row.claimer_id !== userId
   ) {
     throw forbidden('NOT_TASK_PARTY');

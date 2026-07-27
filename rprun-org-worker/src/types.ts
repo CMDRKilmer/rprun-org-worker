@@ -52,9 +52,9 @@ export interface OrgTask {
   claimerCompanyCode?: string;
   contractId?: string;
   contractCreator?: ContractCreator;
-  // 部分接取（partial claim）：子任务的 parentTaskId 指回原任务。
-  // 原任务的 parentTaskId 始终为 undefined。
-  parentTaskId?: string;
+  // listingId：解耦后 task 由哪个挂单接取产生（解耦后新增；老任务为 undefined）。
+  listingId?: string;
+  claimSeq?: number;
   expiresAt?: string;
   createdAt: string;
   publishedAt?: string;
@@ -106,6 +106,31 @@ export interface ApiError {
 }
 
 export type PollScope = 'board' | 'published' | 'claimed';
+
+// 市场挂单：与任务解耦，只挂一个商品。
+// 每被接取一次 → 扣 remaining_amount + 创建一条独立 task。
+export type ListingType = 'BUY' | 'SELL' | 'SHIP';
+export type ListingStatus = 'OPEN' | 'CLOSED' | 'CANCELLED' | 'EXPIRED';
+
+export interface OrgListing {
+  id: string;
+  type: ListingType;
+  commodity: string;
+  amount: number;
+  remainingAmount: number;
+  price: number;
+  currency: string;
+  location?: string;
+  origin?: string;
+  destination?: string;
+  publisherId: string;
+  publisherUsername: string;
+  publisherCompanyCode: string;
+  status: ListingStatus;
+  expiresAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
 
 // PrUn 合同状态（大写，与客户端 types.ts 对齐）
 export type PrunContractStatus =

@@ -5,7 +5,6 @@ import { badRequest, forbidden, notFound, HttpError } from '../utils/http-error'
 import { canTransition } from './task-service';
 import {
   findTaskRowById,
-  findEffectivePublisherId,
   setTaskStatus,
 } from '../db/repositories/tasks.repo';
 import { writeAuditLog } from '../db/repositories/audit-logs.repo';

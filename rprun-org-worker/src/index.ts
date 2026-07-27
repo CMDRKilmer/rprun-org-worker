@@ -5,9 +5,11 @@ import type { Env } from './config';
 import { errorHandler } from './middleware/error';
 import authRoutes from './routes/auth';
 import taskRoutes from './routes/tasks';
+import listingRoutes from './routes/listings';
 import boardRoutes from './routes/board';
 import healthRoutes from './routes/health';
 import { cleanupExpiredTasks } from './services/task-service';
+// 注：listings 过期清理在 listing-service 内部，目前未挂到 cron（阶段 2 接通）。
 import { cleanupRateLimitBuckets } from './db/repositories/rate-limits.repo';
 
 // Hono app（fetch handler）
@@ -40,6 +42,7 @@ app.use('*', cors({
 // 路由挂载
 app.route('/auth', authRoutes);
 app.route('/tasks', taskRoutes);
+app.route('/listings', listingRoutes);
 app.route('/board', boardRoutes);
 app.route('/health', healthRoutes);
 
@@ -54,7 +57,7 @@ export default {
   // wrangler.toml 中配置：[triggers] crons = ["*/5 * * * *"]
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(Promise.allSettled([
-      cleanupExpiredTasks(env),       // 把过期 PUBLISHED 任务标记 CANCELLED
+      cleanupExpiredTasks(env),        // 把过期 PUBLISHED 任务标记 CANCELLED
       cleanupRateLimitBuckets(env.DB), // 删除过期的 rate_limit_buckets 行
     ]));
   },

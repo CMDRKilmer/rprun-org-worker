@@ -3,6 +3,9 @@
 // 注意：tests/setup.ts 同时被 vitest.config.ts 的 setupFiles 引用，
 // 也被 integration.test.ts 显式 import。
 import schemaSql from '../src/db/migrations/001_init.sql?raw';
+import listingsSql from '../src/db/migrations/006_listings.sql?raw';
+import tasksListingIdSql from '../src/db/migrations/007_tasks_listing_id.sql?raw';
+import dropParentTaskIdSql from '../src/db/migrations/008_drop_parent_task_id.sql?raw';
 import type { Env } from '../src/config';
 
 export const SCHEMA_SQL = schemaSql;
@@ -23,7 +26,10 @@ export function formatSqlForExec(sql: string): string {
 
 // 应用 schema 到测试 D1
 export async function applySchema(env: Env): Promise<void> {
-  await env.DB.exec(formatSqlForExec(SCHEMA_SQL));
+  await env.DB.exec(formatSqlForExec(schemaSql));
+  await env.DB.exec(formatSqlForExec(listingsSql));
+  await env.DB.exec(formatSqlForExec(tasksListingIdSql));
+  await env.DB.exec(formatSqlForExec(dropParentTaskIdSql));
 }
 
 // 清空所有表（每个测试前调用）
@@ -32,11 +38,12 @@ export async function applySchema(env: Env): Promise<void> {
 export async function truncateAll(env: Env): Promise<void> {
   const tables = [
     'task_notes',      // 引用 tasks, users
-    'tasks',           // 引用 users
+    'tasks',           // 引用 users（listings 暂不引用 tasks，可不删）
     'refresh_tokens',  // 引用 users
     'invite_codes',    // users.invite_code_id 指向此表（无显式 FK，但逻辑相关）
     'audit_logs',      // 无外键
     'rate_limit_buckets', // 无外键
+    'listings',        // 引用 users；最后删
     'users',           // 最后删除（被其他表引用）
   ];
   for (const t of tables) {

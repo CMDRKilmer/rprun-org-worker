@@ -41,9 +41,14 @@ export const contractJsonSchema = z.object({
   items: z.array(contractItemSchema).min(1),
 });
 
+// 阶段 2：createTaskSchema 限制单 item（多 item 走 /listings 端点）。
+// 注：item 字段仍保留为 array（兼容老数据），但新增任务必须 length === 1。
 export const createTaskSchema = z.object({
   type: z.enum(['BUY', 'SELL', 'SHIP', 'LOAN']),
-  contractJson: contractJsonSchema,
+  contractJson: contractJsonSchema.refine(
+    (cj) => cj.items.length === 1,
+    { message: 'tasks require exactly 1 item; use POST /listings for multi-item listings' },
+  ),
   expiresAt: z.string().datetime().optional(),
 });
 
@@ -56,9 +61,8 @@ export const cancelTaskSchema = z.object({
   reason: z.string().max(512).optional(),
 });
 
-// POST /tasks/:id/claim 可选 body：amount 用于裁剪接取量。
-// 不传或传 null 时接取全部（与旧行为一致）；传 amount 时必须为正整数。
-// 业务校验（amount ≤ 各 item.amount）由 task-service.claimTask 在 SQL 之前完成。
+// 阶段 2：claimTask 不再支持 amount（裁剪接取走 /listings 端点）。
+// 兼容旧客户端：仍允许传 amount 但 service 忽略，触发 deprecation（响应 metadata 提示）。
 export const claimTaskSchema = z.object({
   amount: z.number().int().positive().nullable().optional(),
 });
@@ -122,4 +126,33 @@ export const listAuditLogsQuerySchema = z.object({
   cursor: z.string().min(1).max(64).optional(),
   action: z.string().min(1).max(64).optional(),
   actorId: z.string().min(1).max(64).optional(),
+});
+
+// ========== Listings schemas ==========
+
+export const createListingSchema = z.object({
+  type: z.enum(['BUY', 'SELL', 'SHIP']),
+  commodity: z.string().min(1).max(32),
+  amount: z.number().int().positive(),
+  price: z.number().nonnegative(),
+  currency: z.string().min(1).max(8),
+  location: z.string().max(64).optional(),
+  origin: z.string().max(64).optional(),
+  destination: z.string().max(64).optional(),
+  expiresAt: z.string().datetime().optional(),
+});
+
+export const listListingsQuerySchema = z.object({
+  commodity: z.string().min(1).max(32).optional(),
+  type: z.enum(['BUY', 'SELL', 'SHIP']).optional(),
+  scope: z.enum(['market', 'mine']).optional(),
+  limit: z.coerce.number().int().min(1).max(500).optional(),
+});
+
+export const claimListingSchema = z.object({
+  amount: z.number().int().positive(),
+});
+
+export const cancelListingSchema = z.object({
+  reason: z.string().max(512).optional(),
 });

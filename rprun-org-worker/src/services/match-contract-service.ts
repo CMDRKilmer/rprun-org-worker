@@ -13,7 +13,6 @@ import type { OrgTask, ContractCreator } from '../types';
 import { badRequest, forbidden, notFound } from '../utils/http-error';
 import {
   findTaskRowById,
-  findEffectivePublisherId,
 } from '../db/repositories/tasks.repo';
 import { writeAuditLog } from '../db/repositories/audit-logs.repo';
 import { mapTask } from '../db/mappers';
@@ -48,11 +47,8 @@ export async function matchContract(
 ): Promise<MatchContractResult> {
   const row = await findTaskRowById(env.DB, taskId);
   if (!row) throw notFound('Task not found');
-  // 子任务的 publisher_id 是接取者，需通过父任务追溯到"原始发布者"。
-  const effectivePublisherId = row.parent_task_id
-    ? await findEffectivePublisherId(env.DB, taskId)
-    : row.publisher_id;
-  if (effectivePublisherId !== userId && row.claimer_id !== userId) {
+  // 阶段 2：父子任务已废弃，直接用 publisher_id 判定参与方身份。
+  if (row.publisher_id !== userId && row.claimer_id !== userId) {
     throw forbidden('NOT_TASK_PARTY');
   }
   // 允许重复上报（前端轮询时已关联任务不需要再匹配）；但当任务已

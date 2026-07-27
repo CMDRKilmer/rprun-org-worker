@@ -66,14 +66,11 @@ export async function listTasks(
       binds.push(`%"location":"${filter.location}"%`);
     }
   } else if (filter.scope === 'published') {
-    // 「我的发布」：同时包含
-    //   1. 我是顶级任务 publisher（parent_task_id IS NULL 且 publisher_id = me）
-    //   2. 我是某子任务父任务的 publisher（parent_task_id 指向我发布的任务）——
-    //      partial claim 产生的反向子任务也需要让我看到，方便跟踪合同/状态变更。
-    where.push(
-      '(publisher_id = ? OR parent_task_id IN (SELECT id FROM tasks WHERE publisher_id = ?))',
-    );
-    binds.push(filter.userId, filter.userId);
+    // 「我的发布」：只看我是 publisher 的任务。
+    //   阶段 2 不再有父子任务，partial claim 子任务已废弃；
+    //   老 partial claim 子任务（parent_task_id 非空）保留但不出现在这里。
+    where.push('publisher_id = ?');
+    binds.push(filter.userId);
     if (filter.type) {
       where.push('type = ?');
       binds.push(filter.type);
@@ -83,13 +80,11 @@ export async function listTasks(
       binds.push(filter.claimerUsername);
     }
   } else {
-    // claimed：「我的接取」— 同时匹配两种身份：
-    //   1. 我是完整接取任务的 claimer（claimer_id = userId）
-    //   2. 我是 partial claim 自动创建的反向子任务的 publisher
-    //      （这些子任务的 claimer_id 是 NULL，publisher_id 才是接取者）
-    // 这样玩家既能看见"我接取的单子"，也能看见"我裁剪接取后系统为我生成的反向单"。
-    where.push('(claimer_id = ? OR (publisher_id = ? AND parent_task_id IS NOT NULL))');
-    binds.push(filter.userId, filter.userId);
+    // claimed：「我的接取」— 我是接取者（claimer_id = me）的任务。
+    //   阶段 2 不再有 partial claim 反向子任务；
+    //   老 partial claim 子任务保留但不出现在这里。
+    where.push('claimer_id = ?');
+    binds.push(filter.userId);
   }
 
   if (filter.since) {
@@ -129,29 +124,6 @@ export async function findTaskRowById(db: D1Database, id: string): Promise<TaskR
   return db.prepare('SELECT * FROM tasks WHERE id = ?').bind(id).first<TaskRow>();
 }
 
-// 查询任务的"有效发布者 id"：
-//   - 顶级任务：自身的 publisher_id
-//   - 子任务（partial claim 反向）：父任务的 publisher_id（即原始发布者）
-// 返回 null 表示任务不存在。
-export async function findEffectivePublisherId(
-  db: D1Database,
-  taskId: string,
-): Promise<string | null> {
-  const row = await db
-    .prepare('SELECT publisher_id, parent_task_id FROM tasks WHERE id = ?')
-    .bind(taskId)
-    .first<{ publisher_id: string; parent_task_id: string | null }>();
-  if (!row) return null;
-  if (row.parent_task_id) {
-    const parent = await db
-      .prepare('SELECT publisher_id FROM tasks WHERE id = ?')
-      .bind(row.parent_task_id)
-      .first<{ publisher_id: string }>();
-    return parent?.publisher_id ?? null;
-  }
-  return row.publisher_id;
-}
-
 export interface CreateTaskInput {
   type: TaskType;
   contractJson: TaskContractJson;
@@ -161,50 +133,39 @@ export interface CreateTaskInput {
   expiresAt?: string;
 }
 
-// 批量创建任务：用 db.batch 在同一次调用里插入多条，原子提交。
-// 用于"多物品任务拆解为单物品子任务"——一次发布多物品会展开为 N 条独立任务。
-// 每条都是单物品，partial claim 逻辑可以正常套用。
-// 返回的顺序与 inputs 一致（按 inputs 顺序排列）。
-export async function createTasks(
+// 阶段 2：单条创建任务。解耦后挂单走 listings 端点，tasks 表只承载"合同关联"实体。
+//   老 tasks 端点保留用于兼容老 partial claim 数据（与 listings 并行）。
+//   contractJson 限制单 item：validation 层保证。
+export async function createTask(
   db: D1Database,
-  inputs: CreateTaskInput[],
-): Promise<OrgTask[]> {
-  if (inputs.length === 0) return [];
+  input: CreateTaskInput,
+): Promise<OrgTask> {
   const now = new Date().toISOString();
-  // 在内存里同时持有 id（generateId 是同步生成），batch 后用 id 精确回查。
-  const ids: string[] = inputs.map(() => generateId());
-  const statements = inputs.map((input, i) =>
-    db
-      .prepare(
-        `INSERT INTO tasks (
-           id, type, contract_json, status,
-           publisher_id, publisher_username, publisher_company_code,
-           expires_at, created_at, published_at, updated_at
-         ) VALUES (?, ?, ?, 'PUBLISHED', ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .bind(
-        ids[i],
-        input.type,
-        JSON.stringify(input.contractJson),
-        input.publisherId,
-        input.publisherUsername,
-        input.publisherCompanyCode,
-        input.expiresAt ?? null,
-        now,
-        now,
-        now,
-      ),
-  );
-  await db.batch(statements);
-
-  // 按 id 精确回查，保留顺序
-  const results: OrgTask[] = [];
-  for (const id of ids) {
-    const row = await findTaskRowById(db, id);
-    if (!row) throw new Error(`Task creation failed: id ${id} not found after insert`);
-    results.push(mapTask(row));
-  }
-  return results;
+  const id = generateId();
+  await db
+    .prepare(
+      `INSERT INTO tasks (
+         id, type, contract_json, status,
+         publisher_id, publisher_username, publisher_company_code,
+         expires_at, created_at, published_at, updated_at
+       ) VALUES (?, ?, ?, 'PUBLISHED', ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(
+      id,
+      input.type,
+      JSON.stringify(input.contractJson),
+      input.publisherId,
+      input.publisherUsername,
+      input.publisherCompanyCode,
+      input.expiresAt ?? null,
+      now,
+      now,
+      now,
+    )
+    .run();
+  const row = await findTaskRowById(db, id);
+  if (!row) throw new Error(`Task creation failed: id ${id} not found after insert`);
+  return mapTask(row);
 }
 
 export async function updateTaskContractJson(
@@ -247,126 +208,9 @@ export async function claimTask(
     .run();
 }
 
-// 部分接取：原任务 amount 缩到 (原 - claim) 后保持 PUBLISHED，给接取者创建反向子任务。
-// 子任务 amount = claim，状态 AWAITING_CONTRACT，parent_task_id = 原任务 id。
-// type 反转：父 BUY → 子 SELL（接取者要把货卖给发布者）；
-//           父 SELL → 子 BUY（接取者要从发布者处买入）。
-// SHIP/LOAN 不开放 partial claim（service 层拒绝）。
-// 注意：原任务的 contract_json 不动（amount 仍是发布者定的原始值）。
-//   子任务用全新的 contractJson（items.amount = claim）。
-//   反向合同模板按子任务的 contractCreator 走（claimer 创建 → 'publisher'，
-//   publisher 创建 → 'claimer'）。
-export interface PartialClaimInput {
-  parentTaskId: string;
-  parentContractJson: TaskContractJson;
-  parentType: 'BUY' | 'SELL';
-  claimAmount: number;
-  claimerId: string;
-  claimerUsername: string;
-  claimerCompanyCode: string;
-  // 反向合同的 contractCreator：父 BUY 时由发布者创建反向合同（接取者卖货给发布者），
-  // 父 SELL 时由接取者创建反向合同（接取者从发布者处买）。
-  reverseContractCreator: 'publisher' | 'claimer';
-}
-
-export interface PartialClaimResult {
-  parentUpdated: OrgTask;
-  childCreated: OrgTask;
-}
-
-export async function partialClaimTask(
-  db: D1Database,
-  input: PartialClaimInput,
-): Promise<PartialClaimResult> {
-  // 1. 把原任务的 items.amount 缩到 (原 - claim)。但只在原 amount > claim 时缩；
-  //    若恰好等于则 amount 已是 0，全部被接走 → 转 CANCELLED。
-  const now = new Date().toISOString();
-  const remainingItems = input.parentContractJson.items.map(item => {
-    const remaining = item.amount - input.claimAmount;
-    return { ...item, amount: remaining };
-  });
-  const allZero = remainingItems.every(i => i.amount === 0);
-  const remainingContractJson: TaskContractJson = {
-    ...input.parentContractJson,
-    items: remainingItems,
-  };
-  if (allZero) {
-    // 原任务被全部分完，状态转 CANCELLED（接走的部分由子任务承载反向合同）。
-    await db
-      .prepare(
-        `UPDATE tasks
-         SET status = 'CANCELLED',
-             cancelled_at = ?,
-             contract_json = ?
-         WHERE id = ?`,
-      )
-      .bind(now, JSON.stringify(remainingContractJson), input.parentTaskId)
-      .run();
-  } else {
-    // 部分接取：原任务保持 PUBLISHED，amount 缩到 remaining。
-    await db
-      .prepare(
-        `UPDATE tasks
-         SET contract_json = ?
-         WHERE id = ?`,
-      )
-      .bind(JSON.stringify(remainingContractJson), input.parentTaskId)
-      .run();
-  }
-
-  // 2. 给接取者创建反向子任务，状态 AWAITING_CONTRACT，parent_task_id 指回原任务。
-  const childId = generateId();
-  const reverseType: 'BUY' | 'SELL' =
-    input.parentType === 'BUY' ? 'SELL' : 'BUY';
-  // 子任务的 contractJson：继承原任务的 metadata（currency/location/...），
-  // 反转 template、items.amount 改为 claim（反向合同 amount 必须 = claim）。
-  const childContractJson: TaskContractJson = {
-    ...input.parentContractJson,
-    template: reverseType,
-    items: input.parentContractJson.items.map(item => ({
-      ...item,
-      amount: input.claimAmount,
-    })),
-  };
-  // 子任务模型：
-  //   publisher_* = 接取者（他"创建"这条任务作为反向合同载体）
-  //   claimer_* = NULL（子任务不是被接取的，没有"接取者"概念）
-  //   contract_creator = reverseContractCreator（决定谁去 PrUn 签反向合同）
-  //   parent_task_id = 原任务 ID
-  // 反向合同约定：
-  //   子任务的 contract_json.template 已经是反向（父 BUY→子 SELL / 父 SELL→子 BUY）。
-  //   effectiveTemplate 处理时不希望再反转 → contract_creator = 'publisher'。
-  //   子任务 publisher = 接取者，由他在 PrUn 提交反向合同 offer。
-  await db
-    .prepare(
-      `INSERT INTO tasks (
-         id, type, contract_json, status,
-         publisher_id, publisher_username, publisher_company_code,
-         contract_creator, parent_task_id,
-         claimed_at, created_at, published_at, updated_at
-       ) VALUES (?, ?, ?, 'AWAITING_CONTRACT', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .bind(
-      childId,
-      reverseType,
-      JSON.stringify(childContractJson),
-      input.claimerId,
-      input.claimerUsername,
-      input.claimerCompanyCode,
-      input.reverseContractCreator,
-      input.parentTaskId,
-      now,
-      now,
-      now,
-      now,
-    )
-    .run();
-
-  const child = await findTaskById(db, childId);
-  const parent = await findTaskRowById(db, input.parentTaskId);
-  if (!child || !parent) throw new Error('partialClaimTask: parent or child vanished');
-  return { parentUpdated: mapTask(parent), childCreated: child };
-}
+// 阶段 2：partial claim 已废弃，父子任务路径删除。
+//   裁剪接取走 listings 端点（见 listing-service.ts）。
+//   下方保留 releaseTask / republishTask / deleteTask / setTaskStatus 等基本操作。
 
 export async function releaseTask(db: D1Database, taskId: string): Promise<void> {
   // 释放后任务重新进入 PUBLISHED：重置 published_at 以便客户端"最新发布"排序
@@ -384,82 +228,6 @@ export async function releaseTask(db: D1Database, taskId: string): Promise<void>
     )
     .bind(now, taskId)
     .run();
-}
-
-// 释放部分接取的反向子任务：删除子任务 + 把接走的 amount 加回原任务。
-//   - 原任务 amount 恢复到 (remaining + childAmount) = 原始值
-//   - 原子操作：先读父任务当前 amount，加 childAmount 后 update
-//     （用 batch 让 D1 在一次请求里提交，避免金额错误）
-//   - 子任务物理删除（task_notes 通过 FK CASCADE 自动清理）
-//   - 父任务状态保持 PUBLISHED 不变（partial claim 后原任务本就在 PUBLISHED）
-//
-// 调用方负责业务校验（子任务确实存在、有 parent_task_id、调用者是 publisher）。
-export interface ReleasePartialClaimResult {
-  parentUpdated: OrgTask;
-  childDeletedId: string;
-}
-
-export async function releasePartialClaimTask(
-  db: D1Database,
-  childTaskId: string,
-): Promise<ReleasePartialClaimResult> {
-  // 1. 读子任务
-  const childRow = await findTaskRowById(db, childTaskId);
-  if (!childRow) throw new Error('Child task not found');
-  if (!childRow.parent_task_id) {
-    throw new Error('Task has no parent; not a partial-claim child');
-  }
-
-  // 2. 读父任务当前 contract_json（amount 已被裁剪到 remaining）
-  const parentRow = await findTaskRowById(db, childRow.parent_task_id);
-  if (!parentRow) throw new Error('Parent task not found');
-  let parentContract: TaskContractJson;
-  try {
-    parentContract = typeof parentRow.contract_json === 'string'
-      ? (JSON.parse(parentRow.contract_json) as TaskContractJson)
-      : (parentRow.contract_json as TaskContractJson);
-  } catch {
-    throw new Error('Parent task contract_json is corrupted');
-  }
-  let childContract: TaskContractJson;
-  try {
-    childContract = typeof childRow.contract_json === 'string'
-      ? (JSON.parse(childRow.contract_json) as TaskContractJson)
-      : (childRow.contract_json as TaskContractJson);
-  } catch {
-    throw new Error('Child task contract_json is corrupted');
-  }
-
-  // 3. 加回：父任务的 amount = remaining + childAmount = original
-  //   - 假设父子任务的 items 顺序、commodity、price 都一致（partial claim 保证）。
-  //   - 每个 item.amount += 对应 child item.amount。
-  const restoredItems = parentContract.items.map((item, idx) => ({
-    ...item,
-    amount: item.amount + (childContract.items[idx]?.amount ?? 0),
-  }));
-  const restoredParentJson: TaskContractJson = {
-    ...parentContract,
-    items: restoredItems,
-  };
-
-  // 4. 原子更新：父任务 amount 还原 + 删除子任务
-  const now = new Date().toISOString();
-  // D1 batch 在同一连接里顺序执行；如果任一失败整体回滚（begin/commit 不支持，
-  // 用 batch 内部失败也会终止后续 statements）
-  const statements = [
-    db
-      .prepare('UPDATE tasks SET contract_json = ? WHERE id = ?')
-      .bind(JSON.stringify(restoredParentJson), childRow.parent_task_id),
-    db.prepare('DELETE FROM tasks WHERE id = ?').bind(childTaskId),
-  ];
-  await db.batch(statements);
-
-  const updatedParent = await findTaskRowById(db, childRow.parent_task_id);
-  if (!updatedParent) throw new Error('Parent task vanished after restore');
-  return {
-    parentUpdated: mapTask(updatedParent),
-    childDeletedId: childTaskId,
-  };
 }
 
 // 重新发布：CANCELLED → PUBLISHED。仅清空与取消无关的状态字段，

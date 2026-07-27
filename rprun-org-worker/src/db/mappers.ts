@@ -1,6 +1,6 @@
 // src/db/mappers.ts
 import type {
-  OrgUser, OrgTask, TaskNote, InviteCode, AuditLog,
+  OrgUser, OrgTask, TaskNote, InviteCode, AuditLog, OrgListing,
 } from '../types';
 
 // D1 行类型（snake_case，与 schema 对齐）
@@ -30,9 +30,9 @@ export interface TaskRow {
   claimer_company_code: string | null;
   contract_id: string | null;
   contract_creator: 'publisher' | 'claimer' | null;
-  // 部分接取：子任务用 parent_task_id 指回原任务。
-  // 原任务的 parent_task_id 始终为 NULL（没有上级）。
-  parent_task_id: string | null;
+  // 解耦后新增：task 由哪个挂单接取产生（老任务为 NULL）。
+  listing_id: string | null;
+  claim_seq: number | null;
   expires_at: string | null;
   created_at: string;
   published_at: string | null;
@@ -73,6 +73,26 @@ export interface AuditLogRow {
   created_at: string;
 }
 
+export interface ListingRow {
+  id: string;
+  type: 'BUY' | 'SELL' | 'SHIP';
+  commodity: string;
+  amount: number;
+  remaining_amount: number;
+  price: number;
+  currency: string;
+  location: string | null;
+  origin: string | null;
+  destination: string | null;
+  publisher_id: string;
+  publisher_username: string;
+  publisher_company_code: string;
+  status: 'OPEN' | 'CLOSED' | 'CANCELLED' | 'EXPIRED';
+  expires_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export function mapUser(row: UserRow): OrgUser {
   return {
     id: row.id,
@@ -100,7 +120,8 @@ export function mapTask(row: TaskRow): OrgTask {
     claimerCompanyCode: row.claimer_company_code ?? undefined,
     contractId: row.contract_id ?? undefined,
     contractCreator: row.contract_creator ?? undefined,
-    parentTaskId: row.parent_task_id ?? undefined,
+    listingId: row.listing_id ?? undefined,
+    claimSeq: row.claim_seq ?? undefined,
     expiresAt: row.expires_at ?? undefined,
     createdAt: row.created_at,
     publishedAt: row.published_at ?? undefined,
@@ -145,5 +166,27 @@ export function mapAuditLog(row: AuditLogRow): AuditLog {
     targetId: row.target_id ?? undefined,
     metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
     createdAt: row.created_at,
+  };
+}
+
+export function mapListing(row: ListingRow): OrgListing {
+  return {
+    id: row.id,
+    type: row.type,
+    commodity: row.commodity,
+    amount: row.amount,
+    remainingAmount: row.remaining_amount,
+    price: row.price,
+    currency: row.currency,
+    location: row.location ?? undefined,
+    origin: row.origin ?? undefined,
+    destination: row.destination ?? undefined,
+    publisherId: row.publisher_id,
+    publisherUsername: row.publisher_username,
+    publisherCompanyCode: row.publisher_company_code,
+    status: row.status,
+    expiresAt: row.expires_at ?? undefined,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
 }
