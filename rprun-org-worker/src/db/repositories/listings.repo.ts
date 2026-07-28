@@ -137,6 +137,43 @@ export async function cancelListing(db: D1Database, listingId: string, publisher
 }
 
 /**
+ * 释放挂单接取：把已扣减的 remaining_amount 加回去。
+ * 如果 listing 之前因为 amount 扣到 0 而 status='CLOSED'，恢复后 status='OPEN'。
+ * 边界：如果 newRemaining > amount，clamp 到 amount（防止数据漂移导致超额）。
+ *
+ * 事务约束：调用方需在 DELETE task 之前调用本函数（保证失败时 listing 状态不悬空）。
+ */
+export async function restoreListingAmount(
+  db: D1Database,
+  listingId: string,
+  restoreAmount: number,
+): Promise<OrgListing | null> {
+  if (restoreAmount <= 0) {
+    throw new Error('restoreAmount must be positive');
+  }
+  // 读取当前快照
+  const row = await db
+    .prepare(`SELECT amount, remaining_amount, status FROM listings WHERE id = ?`)
+    .bind(listingId)
+    .first<{ amount: number; remaining_amount: number; status: ListingStatus }>();
+  if (!row) return null;
+  // CLOSED / CANCELLED 状态不允许恢复（listing 已结束）
+  if (row.status === 'CANCELLED') return null;
+
+  const restored = Math.min(row.remaining_amount + restoreAmount, row.amount);
+  // 如果之前是 CLOSED，恢复后剩余量 > 0，置回 OPEN
+  const newStatus: ListingStatus = restored > 0 ? 'OPEN' : row.status;
+  if (restored === row.remaining_amount && newStatus === row.status) {
+    return findListingById(db, listingId); // 无变化，避免无谓写
+  }
+  await db
+    .prepare(`UPDATE listings SET remaining_amount = ?, status = ? WHERE id = ?`)
+    .bind(restored, newStatus, listingId)
+    .run();
+  return findListingById(db, listingId);
+}
+
+/**
  * 同一挂单下一次接取的 seq 序号。
  * 调用方：createListingClaimTask 内部。
  */

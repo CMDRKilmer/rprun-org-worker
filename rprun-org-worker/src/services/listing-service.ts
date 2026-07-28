@@ -13,6 +13,7 @@ import {
   listListingsByPublisher,
   claimFromListing,
   cancelListing,
+  restoreListingAmount,
   nextClaimSeq,
 } from '../db/repositories/listings.repo';
 import { findTaskRowById } from '../db/repositories/tasks.repo';
@@ -280,4 +281,77 @@ export async function claimListing(
     throw new HttpError(500, 'INTERNAL_ERROR', 'Listing or task vanished after claim');
   }
   return { task: mapTask(taskRow), listing: updatedListing };
+}
+
+/**
+ * 释放挂单接取：恢复 listing.remaining_amount + 物理删除 task（AWAITING_CONTRACT）。
+ * 只有"老 release 没接 listing_id 路径"的副作用修复。物理删除 task 是因为：
+ *   - claimListing 在事务里创建 task，releaseListingClaim 也在事务里删 task；
+ *   - 任何后续的 linkContract 都不允许（task 不存在 = 不能关联合同）。
+ *
+ * 约束：当前用户必须是 task.claimer_id；task.listing_id 必须存在（这是新架构 task）。
+ *
+ * 返回：被删除的 task（已在 DB 中删除，返回最后一次快照）。
+ */
+export async function releaseListingClaim(
+  env: Env,
+  taskId: string,
+  userId: string,
+): Promise<{ task: OrgTask; listing: OrgListing | null }> {
+  const row = await findTaskRowById(env.DB, taskId);
+  if (!row) throw notFound('Task not found');
+  if (row.claimer_id !== userId) {
+    throw forbidden('Only the claimer can release');
+  }
+  if (row.status !== 'AWAITING_CONTRACT') {
+    throw badRequest(
+      'INVALID_TRANSITION',
+      `Cannot release from ${row.status} state; release only allowed in AWAITING_CONTRACT`,
+    );
+  }
+  if (!row.listing_id) {
+    throw badRequest(
+      'NOT_LISTING_TASK',
+      'Task is not backed by a listing; use /tasks/:id/release instead',
+    );
+  }
+  if (row.contract_id) {
+    throw badRequest(
+      'CONTRACT_LINKED',
+      'Task already has a contract linked; unlink before release',
+    );
+  }
+
+  // task.contract_json.items[0].amount 即本次接取量
+  let claimAmount = 0;
+  try {
+    const cj = JSON.parse(row.contract_json);
+    claimAmount = cj?.items?.[0]?.amount ?? 0;
+  } catch {
+    // contract_json 损坏——按 0 处理，但仍然只删 task；listing 不动
+  }
+  if (claimAmount <= 0) {
+    // 异常分支：仅删 task，不动 listing，避免悬挂
+    await env.DB.prepare(`DELETE FROM tasks WHERE id = ?`).bind(taskId).run();
+    return { task: mapTask(row), listing: null };
+  }
+
+  // 事务式：先恢复 listing.remaining_amount，再删 task
+  // 若删 task 失败，listing 已恢复（接取者可以重试 release 或走老 releaseTask 把 task 置 PUBLISHED）
+  const restoredListing = await restoreListingAmount(env.DB, row.listing_id, claimAmount);
+  await env.DB.prepare(`DELETE FROM tasks WHERE id = ?`).bind(taskId).run();
+
+  await writeAuditLog(env.DB, {
+    actorType: 'user',
+    actorId: userId,
+    action: 'listing.release',
+    targetType: 'task',
+    targetId: taskId,
+    metadata: {
+      listing_id: row.listing_id,
+      restored_amount: claimAmount,
+    },
+  });
+
+  return { task: mapTask(row), listing: restoredListing };
 }

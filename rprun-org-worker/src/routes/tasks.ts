@@ -30,6 +30,7 @@ import {
 } from '../services/task-service';
 import { matchContract } from '../services/match-contract-service';
 import { syncTaskFromContract } from '../services/contract-sync-service';
+import { releaseListingClaim } from '../services/listing-service';
 import { listNotesByTask, createNote } from '../db/repositories/notes.repo';
 
 const tasks = new Hono<{ Bindings: Env; Variables: ContextVars }>();
@@ -103,9 +104,26 @@ tasks.post('/:id/claim', async (c) => {
 });
 
 // POST /tasks/:id/release
-// 释放：AWAITING_CONTRACT → PUBLISHED（不再处理 partial claim 子任务）。
+// 释放：AWAITING_CONTRACT → 恢复 listing.remaining_amount + 物理删除 task（新架构）；
+//   老 task（无 listing_id）走 releaseTask 回退到 PUBLISHED 状态。
+//   通过预读 task.listing_id 字段判断走哪条路径。
 tasks.post('/:id/release', async (c) => {
-  const result = await releaseTask(c.env, c.req.param('id'), c.var.userId);
+  const taskId = c.req.param('id');
+  // 先 peek task.listing_id，决定走哪条路径
+  const peek = await c.env.DB
+    .prepare(`SELECT listing_id FROM tasks WHERE id = ?`)
+    .bind(taskId)
+    .first<{ listing_id: string | null }>();
+  if (!peek) {
+    return c.json({ error: { code: 'NOT_FOUND', message: 'Task not found' } }, 404 as ContentfulStatusCode);
+  }
+  if (peek.listing_id) {
+    // 新架构：恢复 listing + 删 task
+    const result = await releaseListingClaim(c.env, taskId, c.var.userId);
+    return c.json(result, 200 as ContentfulStatusCode);
+  }
+  // 老 task：保留回退路径
+  const result = await releaseTask(c.env, taskId, c.var.userId);
   return c.json(result, 200 as ContentfulStatusCode);
 });
 
