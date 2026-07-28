@@ -187,30 +187,12 @@ export async function updateTaskContractJson(
   }
 }
 
-export async function claimTask(
-  db: D1Database,
-  taskId: string,
-  claimerId: string,
-  claimerUsername: string,
-  claimerCompanyCode: string,
-  contractCreator: 'publisher' | 'claimer',
-): Promise<void> {
-  const now = new Date().toISOString();
-  await db
-    .prepare(
-      `UPDATE tasks
-       SET status = 'AWAITING_CONTRACT',
-           claimer_id = ?, claimer_username = ?, claimer_company_code = ?,
-           contract_creator = ?, claimed_at = ?
-       WHERE id = ?`,
-    )
-    .bind(claimerId, claimerUsername, claimerCompanyCode, contractCreator, now, taskId)
-    .run();
-}
-
 // 阶段 2：partial claim 已废弃，父子任务路径删除。
 //   裁剪接取走 listings 端点（见 listing-service.ts）。
 //   下方保留 releaseTask / republishTask / deleteTask / setTaskStatus 等基本操作。
+//
+// 老架构 claimTask repo 已删除——接取走 /listings/:id/claim（见 listing-service.claimListing）。
+// releaseTask 仍保留用于 /tasks/:id/release 老路径兜底（无 listing_id 的老 task）。
 
 export async function releaseTask(db: D1Database, taskId: string): Promise<void> {
   // 释放后任务重新进入 PUBLISHED：重置 published_at 以便客户端"最新发布"排序

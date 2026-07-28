@@ -6,7 +6,6 @@ import type {
 import { badRequest, forbidden, notFound, HttpError } from '../utils/http-error';
 import { mapTask } from '../db/mappers';
 import {
-  claimTask as repoClaimTask,
   createTask as repoCreateTask,
   deleteTask as repoDeleteTask,
   findTaskRowById,
@@ -152,42 +151,6 @@ export async function listTasksForUser(
     limit: filter.limit,
     cursor: filter.cursor,
   });
-}
-
-export interface ClaimTaskResult {
-  task: OrgTask;
-}
-
-export async function claimTask(
-  env: Env,
-  taskId: string,
-  userId: string,
-  prunUsername: string,
-  companyCode: string,
-): Promise<ClaimTaskResult> {
-  const row = await findTaskRowById(env.DB, taskId);
-  if (!row) throw notFound('Task not found');
-  if (row.status !== 'PUBLISHED') {
-    throw badRequest('INVALID_TRANSITION', `Cannot claim task in ${row.status} state`);
-  }
-  if (row.publisher_id === userId) {
-    throw badRequest('CANNOT_CLAIM_OWN', 'Cannot claim your own task');
-  }
-  // 阶段 2：不再支持 partial claim（裁剪接取）；裁剪接取走 listings 端点。
-  // 完整接取：原任务 → AWAITING_CONTRACT。
-  const contractCreator: ContractCreator = row.type === 'SHIP' ? 'publisher' : 'claimer';
-  await repoClaimTask(env.DB, taskId, userId, prunUsername, companyCode, contractCreator);
-  await writeAuditLog(env.DB, {
-    actorType: 'user',
-    actorId: userId,
-    action: 'task.claim',
-    targetType: 'task',
-    targetId: taskId,
-    metadata: { contract_creator: contractCreator },
-  });
-  const updated = await findTaskRowById(env.DB, taskId);
-  if (!updated) throw new HttpError(500, 'INTERNAL_ERROR', 'Task not found after claim');
-  return { task: mapTask(updated) };
 }
 
 // 阶段 3：release 完全简化。

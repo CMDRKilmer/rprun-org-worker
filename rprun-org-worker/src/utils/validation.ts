@@ -63,9 +63,7 @@ export const cancelTaskSchema = z.object({
 
 // 阶段 2：claimTask 不再支持 amount（裁剪接取走 /listings 端点）。
 // 兼容旧客户端：仍允许传 amount 但 service 忽略，触发 deprecation（响应 metadata 提示）。
-export const claimTaskSchema = z.object({
-  amount: z.number().int().positive().nullable().optional(),
-});
+// 老架构 claimTaskSchema 已删除——接取走 /listings/:id/claim（见 claimListingSchema）。
 
 export const linkContractSchema = z.object({
   contractId: z.string().min(1).max(64),

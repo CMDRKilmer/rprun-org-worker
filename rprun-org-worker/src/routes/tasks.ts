@@ -8,7 +8,6 @@ import {
   createTaskSchema,
   patchTaskSchema,
   cancelTaskSchema,
-  claimTaskSchema,
   linkContractSchema,
   matchContractSchema,
   syncStatusSchema,
@@ -22,7 +21,6 @@ import {
   getTaskForUser,
   listTasksForUser,
   patchTask,
-  claimTask,
   releaseTask,
   cancelTask,
   republishTask,
@@ -83,30 +81,13 @@ tasks.patch('/:id', async (c) => {
   return c.json(task, 200 as ContentfulStatusCode);
 });
 
-// POST /tasks/:id/claim
-// 阶段 2：完整接取（不再支持 partial claim / amount 参数）。
-//   裁剪接取走 /listings/:id/claim。
-//   兼容旧客户端：仍允许传 amount 但 service 忽略。
-tasks.post('/:id/claim', async (c) => {
-  const rawBody = await c.req.json().catch(() => ({}));
-  const parsed = claimTaskSchema.safeParse(rawBody);
-  if (!parsed.success) {
-    throw apiError('VALIDATION_ERROR', parsed.error.issues[0].message, 400);
-  }
-  const result = await claimTask(
-    c.env,
-    c.req.param('id'),
-    c.var.userId,
-    c.var.prunUsername,
-    c.var.companyCode,
-  );
-  return c.json(result, 200 as ContentfulStatusCode);
-});
-
 // POST /tasks/:id/release
 // 释放：AWAITING_CONTRACT → 恢复 listing.remaining_amount + 物理删除 task（新架构）；
 //   老 task（无 listing_id）走 releaseTask 回退到 PUBLISHED 状态。
 //   通过预读 task.listing_id 字段判断走哪条路径。
+//
+// 老架构：POST /tasks/:id/claim 端点已删除（架构迁移完成）。
+//   接取走 /listings/:id/claim。
 tasks.post('/:id/release', async (c) => {
   const taskId = c.req.param('id');
   // 先 peek task.listing_id，决定走哪条路径
