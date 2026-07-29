@@ -4,6 +4,20 @@ ORG（组织管理面板）后端 Cloudflare Worker。独立部署，提供邀�
 
 > 客户端代码在 rprun 扩展仓库的 `src/infrastructure/org-api/`。本后端必须严格对齐客户端契约。
 
+## 当前架构概览
+
+经过几轮迭代后，本 Worker 已完成 **任务与挂单解耦（listings 模块上线）**：
+
+- **tasks**：保留作为单物品任务终态持久化与合同绑定的事务核心，承载合同关联、状态机、审计日志、子任务权限校验与 `match-contract` 权威匹配。
+- **listings**：作为市场挂单的事务核心，承载单商品挂单的发布、浏览、接取、取消与额度管理。`/listings/:id/claim` 替代旧的 `/tasks/:id/claim`；`/tasks/:id/release` 在新架构下处理带 `listing_id` 的任务释放（恢复挂单额度 + 物理删除）。
+- **users / extension-users / board**：邀请注册、扩展用户上报、董事会成员管理与邀请码生成。
+- **notes / audit-logs**：附属于任务的笔记与不可变审计日志（任务删除保留审计）。
+- **match-contract-service**：基于 `task.contractJson` 的权威合同匹配服务，配合前端的 `AUTO_LINK_CONTRACT.md` "方案 B"。
+
+`/tasks` 与 `/board/audit-logs` 统一返回 `{ items, nextCursor }`。
+
+完整变更历史见 [CHANGELOG.md](./CHANGELOG.md)。
+
 ## 技术栈
 
 - Cloudflare Workers (V8 isolate)
