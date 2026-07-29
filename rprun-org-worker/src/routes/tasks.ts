@@ -25,6 +25,7 @@ import {
   cancelTask,
   republishTask,
   linkContract,
+  unlinkContract,
 } from '../services/task-service';
 import { matchContract } from '../services/match-contract-service';
 import { syncTaskFromContract } from '../services/contract-sync-service';
@@ -149,6 +150,15 @@ tasks.post('/:id/link-contract', async (c) => {
     parsed.data.contractId,
     parsed.data.contractCreator,
   );
+  return c.json(task, 200 as ContentfulStatusCode);
+});
+
+// POST /tasks/:id/unlink-contract
+// 解绑合同：与 link-contract 对称。仅 task 参与方可调。
+//   前端典型用法：用户误关联了合同后想重选；release 之前如果 contract_id 非空，
+//   也需要先 unlink 再 release（releaseListingClaim 仍以 contract_id 兜底校验）。
+tasks.post('/:id/unlink-contract', async (c) => {
+  const task = await unlinkContract(c.env, c.req.param('id'), c.var.userId);
   return c.json(task, 200 as ContentfulStatusCode);
 });
 

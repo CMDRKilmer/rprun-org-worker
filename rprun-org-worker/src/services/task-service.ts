@@ -10,6 +10,7 @@ import {
   deleteTask as repoDeleteTask,
   findTaskRowById,
   linkContract as repoLinkContract,
+  unlinkContract as repoUnlinkContract,
   releaseTask as repoReleaseTask,
   republishTask as repoRepublishTask,
   setTaskStatus,
@@ -279,6 +280,44 @@ export async function linkContract(
   });
   const updated = await findTaskRowById(env.DB, taskId);
   if (!updated) throw new HttpError(500, 'INTERNAL_ERROR', 'Task not found after link');
+  return mapTask(updated);
+}
+
+// 解绑合同：仅 task 参与方（publisher 或 claimer）可解绑。
+//   用于「误关联 / 关联错误合同」的场景：解绑后回到 AWAITING_CONTRACT，可重新 link
+//   或 release。当前 status 必须为 AWAITING_CONTRACT / IN_PROGRESS：
+//   - COMPLETED / CANCELLED 是终态，合同应保留作为历史证据，不允许清空。
+//   - PUBLISHED 还没接取，理论上 contract_id 就是 NULL，调用方拿到 409。
+export async function unlinkContract(
+  env: Env,
+  taskId: string,
+  userId: string,
+): Promise<OrgTask> {
+  const row = await findTaskRowById(env.DB, taskId);
+  if (!row) throw notFound('Task not found');
+  if (row.publisher_id !== userId && row.claimer_id !== userId) {
+    throw forbidden('NOT_TASK_PARTY');
+  }
+  if (row.status !== 'AWAITING_CONTRACT' && row.status !== 'IN_PROGRESS') {
+    throw badRequest(
+      'INVALID_TRANSITION',
+      `Cannot unlink contract in ${row.status} state`,
+    );
+  }
+  if (!row.contract_id) {
+    throw badRequest('NO_CONTRACT_LINKED', 'Task has no linked contract');
+  }
+  await repoUnlinkContract(env.DB, taskId);
+  await writeAuditLog(env.DB, {
+    actorType: 'user',
+    actorId: userId,
+    action: 'task.unlink_contract',
+    targetType: 'task',
+    targetId: taskId,
+    metadata: { contract_id: row.contract_id, contract_creator: row.contract_creator },
+  });
+  const updated = await findTaskRowById(env.DB, taskId);
+  if (!updated) throw new HttpError(500, 'INTERNAL_ERROR', 'Task not found after unlink');
   return mapTask(updated);
 }
 

@@ -242,6 +242,21 @@ export async function linkContract(
     .run();
 }
 
+// 解绑合同：清空 contract_id / contract_creator，状态保持 AWAITING_CONTRACT 不变。
+//   调用方（service 层）必须先校验 task 参与方身份 + 状态合法性。
+//   不修改 status / claimer 等其他字段——解绑后任务回到「未关联合同但已接取」状态，
+//   后续可以重新 linkContract 或 release。
+export async function unlinkContract(db: D1Database, taskId: string): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE tasks
+       SET contract_id = NULL, contract_creator = NULL
+       WHERE id = ?`,
+    )
+    .bind(taskId)
+    .run();
+}
+
 // 物理删除任务。task_notes 通过 FK ON DELETE CASCADE 自动清理；
 // audit_logs 无 FK（target_id 是软引用），保留作为历史审计轨迹。
 // 返回 rows affected（1 = 删成功，0 = 行不存在）。
