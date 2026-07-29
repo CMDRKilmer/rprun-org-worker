@@ -199,13 +199,16 @@ export async function claimListing(
     : 'SHIP';
   const contractCreator: ContractCreator = listing.type === 'SHIP' ? 'publisher' : 'claimer';
 
-  // task 的 contractJson：单 item = listing 的 commodity/amount/price；其他字段按 type 透传
+  // task 的 contractJson：单 item = listing 的 commodity/amount/price；其他字段按 type 透传。
+  // 市场合同默认 7 天限期：接取者必须在 7 天内完成 PrUn 合同签订与交付。
+  // 该 deadline 字段进入 contract_json，对接取者在 PrUn 签合同时作为期限参考。
   const taskContractJson = {
     template: reverseType,
     currency: listing.currency,
     location: listing.location,
     origin: listing.origin,
     destination: listing.destination,
+    deadline: 7,
     items: [{ commodity: listing.commodity, amount, price: listing.price }],
   };
 

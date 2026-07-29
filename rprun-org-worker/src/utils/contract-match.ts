@@ -23,6 +23,14 @@ export interface ContractFingerprint {
   origin?: string;
   destination?: string;
   price?: number;
+  // 交易对方 PrUn username（去掉公司后缀的纯 username 部分）。
+  // 必填：避免不同玩家签相同 fingerprint 误匹配。
+  partnerName?: string;
+  // 交易对方公司代码（PrUn partner.code，如 "QPL"）。
+  // 与 partnerName 互补：company code 是稳定的 username → 公司映射锚点。
+  // match-contract-service 用此字段与 task.publisher_company_code /
+  // claimer_company_code 比对；缺失视为放行（兼容老合同 / 派系合同）。
+  partnerCode?: string;
 }
 
 export interface MatchResult {
@@ -104,6 +112,8 @@ function totalPriceFromItems(items: { commodity: string; amount: number; price?:
 
 // 权威比对：以 task.contractJson 为 source of truth，
 // 应用反转后与前端上报的 fingerprint 严格匹配。
+// 注意：partnerName 校验在调用方（matchContractService）里做，
+// 取决于 task.publisher_username / claimer_username 与 fingerprint.partnerName 比对。
 export function matchContractFingerprint(
   taskJson: TaskContractJson,
   creator: ContractCreator | undefined,
@@ -126,6 +136,12 @@ export function matchContractFingerprint(
   }
   if (!itemsEqual(task.items, fingerprint.items)) {
     return { matched: false, reason: 'items mismatch' };
+  }
+  // partnerName：fingerprint 必须带 partnerName（contract.partner.name 解析）。
+  // 缺失视为未知 → 跳过校验（让更宽松的 fingerprint 比对通过；调用方
+  // 应当已经做了 partner 预筛，否则 false positive 风险高）。
+  if (fingerprint.partnerName !== undefined && fingerprint.partnerName === '') {
+    return { matched: false, reason: 'partnerName empty' };
   }
   // 顶层 price 比对：BUY/SELL 任务价格在 item 级别，task.contractJson.price
   // 可能是 undefined；合同侧 fingerprint.price 来自 PAYMENT 总金额。

@@ -69,6 +69,33 @@ export async function matchContract(
     typeof matchContractFingerprint
   >[0];
 
+  // 公司代码校验：合同 partner.code（"QPL"）必须与 task 的
+  // publisher_company_code / claimer_company_code 之一匹配。
+  // PrUn partner.name 是公司全名（"Quantum Pulse Inc"）不便比对，
+  // partner.code 是公司代码（"QPL"）是稳定的 username → 公司映射锚点。
+  // 缺失 contract.partner.code 视为未知（保守放行让 fingerprint + UNIQUE 兜底）。
+  if (params.fingerprint.partnerCode) {
+    const partnerCode = params.fingerprint.partnerCode.toUpperCase();
+    const matchesParty =
+      row.publisher_company_code === partnerCode ||
+      row.claimer_company_code === partnerCode;
+    if (!matchesParty) {
+      await writeAuditLog(env.DB, {
+        actorType: 'user',
+        actorId: userId,
+        action: 'task.match_contract',
+        targetType: 'task',
+        targetId: taskId,
+        metadata: {
+          contract_id: params.contractId,
+          matched: false,
+          reason: `company code mismatch: contract.partner.code=${params.fingerprint.partnerCode} task.publisher_company_code=${row.publisher_company_code} task.claimer_company_code=${row.claimer_company_code}`,
+        },
+      });
+      return { matched: false, reason: 'company code mismatch' };
+    }
+  }
+
   // 发布者发送的合同不反转：优先用 publisher 匹配（no inversion），
   // 失败再尝试 claimer（inversion）。不依赖存储的 contract_creator。
   let result: MatchResult = matchContractFingerprint(
