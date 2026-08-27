@@ -6,6 +6,8 @@ import schemaSql from '../src/db/migrations/001_init.sql?raw';
 import listingsSql from '../src/db/migrations/006_listings.sql?raw';
 import tasksListingIdSql from '../src/db/migrations/007_tasks_listing_id.sql?raw';
 import dropParentTaskIdSql from '../src/db/migrations/008_drop_parent_task_id.sql?raw';
+import chainSyncSql from '../src/db/migrations/009_chain_sync.sql?raw';
+import chainSyncPerShipSql from '../src/db/migrations/010_chain_sync_per_ship.sql?raw';
 import type { Env } from '../src/config';
 
 export const SCHEMA_SQL = schemaSql;
@@ -30,6 +32,8 @@ export async function applySchema(env: Env): Promise<void> {
   await env.DB.exec(formatSqlForExec(listingsSql));
   await env.DB.exec(formatSqlForExec(tasksListingIdSql));
   await env.DB.exec(formatSqlForExec(dropParentTaskIdSql));
+  await env.DB.exec(formatSqlForExec(chainSyncSql));
+  await env.DB.exec(formatSqlForExec(chainSyncPerShipSql));
 }
 
 // 清空所有表（每个测试前调用）
@@ -44,6 +48,7 @@ export async function truncateAll(env: Env): Promise<void> {
     'audit_logs',      // 无外键
     'rate_limit_buckets', // 无外键
     'listings',        // 引用 users；最后删
+    'chain_sync',      // 无外键；按 company_code 隔离
     'users',           // 最后删除（被其他表引用）
   ];
   for (const t of tables) {

@@ -8,6 +8,7 @@ import taskRoutes from './routes/tasks';
 import listingRoutes from './routes/listings';
 import boardRoutes from './routes/board';
 import healthRoutes from './routes/health';
+import chainSyncRoutes from './routes/chain-sync';
 import { cleanupExpiredTasks } from './services/task-service';
 // 注：listings 过期清理在 listing-service 内部，目前未挂到 cron（阶段 2 接通）。
 import { cleanupRateLimitBuckets } from './db/repositories/rate-limits.repo';
@@ -32,7 +33,8 @@ const isAllowedOrigin = (origin: string): boolean =>
 
 app.use('*', cors({
   origin: (origin) => (origin && isAllowedOrigin(origin) ? origin : null),
-  allowMethods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+  // PUT 用于 /chain-sync 环线同步推送（乐观锁）；预检会校验 Access-Control-Allow-Methods
+  allowMethods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
   allowHeaders: ['Authorization', 'Content-Type'],
   exposeHeaders: ['Content-Length'],
   maxAge: 86400,
@@ -45,6 +47,7 @@ app.route('/tasks', taskRoutes);
 app.route('/listings', listingRoutes);
 app.route('/board', boardRoutes);
 app.route('/health', healthRoutes);
+app.route('/chain-sync', chainSyncRoutes);
 
 // 根 404（未匹配路由）
 app.notFound((c) => c.json({ error: { code: 'NOT_FOUND', message: 'Not found' } }, 404));

@@ -13,6 +13,7 @@ ORG（组织管理面板）后端 Cloudflare Worker。独立部署，提供邀�
 - **users / extension-users / board**：邀请注册、扩展用户上报、董事会成员管理与邀请码生成。
 - **notes / audit-logs**：附属于任务的笔记与不可变审计日志（任务删除保留审计）。
 - **match-contract-service**：基于 `task.contractJson` 的权威合同匹配服务，配合前端的 `AUTO_LINK_CONTRACT.md` "方案 B"。
+- **chain-sync**（`/chain-sync`）：环线多端同步端点。每个 PrUn 公司账号（JWT `company_code`）一份环线快照（配置 + chainRuns + 环线 ACT 包/触发器，payload 为透传 JSON）。`GET` 拉取快照（无记录 204）；`PUT` 带 `baseUpdatedAt` 乐观锁——库内 `updated_at` 更新时返回 409 + 最新快照，前端重新合并（`src/db/migrations/009_chain_sync.sql`、`src/db/repositories/chain-sync.repo.ts`、`src/routes/chain-sync.ts`）。
 
 `/tasks` 与 `/board/audit-logs` 统一返回 `{ items, nextCursor }`。
 
@@ -41,6 +42,12 @@ pnpm install
 pnpm db:migrate:local   # 应用 D1 schema 到本地 Miniflare
 pnpm dev                # 启动 wrangler dev，默认 http://localhost:8787
 ```
+
+- 本地 `wrangler dev` 需要 `.dev.vars` 提供 `JWT_SECRET` / `REFRESH_TOKEN_SECRET`
+  （否则 JWT 签名报 `Imported HMAC key length (0)`；`.dev.vars` 已被 .gitignore）。
+- 本地 D1 迁移是**逐个文件**手动执行（`db:migrate:local` 只跑 001）：
+  `pnpm exec wrangler d1 execute rprun-org-db --local --file=src/db/migrations/NNN_*.sql`
+  （新增 migration 需同步 `tests/setup.ts` 的 `applySchema` 与 `truncateAll`）。
 
 ### 测试
 

@@ -101,6 +101,20 @@ export const createNoteSchema = z.object({
   content: z.string().min(1).max(4096),
 });
 
+// 环线多端同步 PUT 载荷：payload 为前端按船 ChainSyncDoc（JSON 透传，服务端不解析内部结构）。
+// shipId 为实际船 id 或 '__config__'；payloadVersion 表达前端 schema 版本（当前 1）；
+// baseUpdatedAt 为乐观锁基准（客户端最近一次 GET 到该船的 updatedAt）。
+export const chainSyncPutSchema = z
+  .object({
+    shipId: z.string().min(1).max(64),
+    payload: z.unknown(),
+    payloadVersion: z.number().int().min(1).max(99).optional(),
+    baseUpdatedAt: z.number().int().nonnegative(),
+  })
+  .refine((v) => (JSON.stringify(v.payload)?.length ?? 0) <= 512 * 1024, {
+    message: 'chain sync payload exceeds 512KB',
+  });
+
 export const generateInviteCodesSchema = z.object({
   count: z.number().int().min(1).max(50),
   createdBy: z.string().min(1).max(64),
